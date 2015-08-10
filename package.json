@@ -1,13 +1,13 @@
 {
   "name": "blackbone-node",
   "version": "1.0.0",
-  "description": "",
+  "description": "JavaScript bindings for BlackBone memory hacking library",
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
   },
-  "author": "",
-  "license": "ISC",
+  "author": "@k4rliky",
+  "license": "MIT",
   "scripts": {
     "install": "cmake-js rebuild"
   },
