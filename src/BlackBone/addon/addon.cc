@@ -11,7 +11,7 @@ using namespace blackbone;
 /// functions so we can reuse it
 Process proc;
 
-void SearchProcess(const Nan::FunctionCallbackInfo<v8::Value>& info) {
+void searchProcess(const Nan::FunctionCallbackInfo<v8::Value>& info) {
 
   LPCWSTR processName = (LPCWSTR) * v8::String::Value(info[0]->ToString());
 
@@ -22,7 +22,7 @@ void SearchProcess(const Nan::FunctionCallbackInfo<v8::Value>& info) {
 
   if (found.size() > 0)
   {
-      std::wcout << L"\nFound. Attaching to process " << std::dec << found.front() << std::endl;
+      std::wcout << L"\nProcess Found. Attaching to process " << std::dec << found.front() << std::endl;
 
       if (proc.Attach( found.front() ) != STATUS_SUCCESS)
       {
@@ -30,12 +30,6 @@ void SearchProcess(const Nan::FunctionCallbackInfo<v8::Value>& info) {
           return;
       }
 
-      std::wcout << L"\nSearching for Data... ";
-
-      int rtnValue = 0;
-      proc.memory().Read(0x7FF97E7D1BD8, sizeof(rtnValue), &rtnValue);
-
-      std::wcout << L"\nTHIS IS THE DATA " << std::dec << rtnValue << std::endl;
       info.GetReturnValue().Set(true);
   } else {
     info.GetReturnValue().SetUndefined();
@@ -43,9 +37,22 @@ void SearchProcess(const Nan::FunctionCallbackInfo<v8::Value>& info) {
 
 }
 
+void readData(const Nan::FunctionCallbackInfo<v8::Value>& info) {
+	std::wcout << L"\nSearching for Data... ";
+
+	int rtnValue = 0;
+	proc.memory().Read(0x7FF97E7D1BD8, sizeof(rtnValue), &rtnValue);
+
+	std::wcout << L"\nTHIS IS THE DATA " << std::dec << rtnValue << std::endl;
+
+	info.GetReturnValue().Set(rtnValue);
+}
+
 void Init(v8::Local<v8::Object> exports) {
   exports->Set(Nan::New("searchProcess").ToLocalChecked(),
-               Nan::New<v8::FunctionTemplate>(SearchProcess)->GetFunction());
+	  Nan::New<v8::FunctionTemplate>(searchProcess)->GetFunction());
+  exports->Set(Nan::New("readData").ToLocalChecked(),
+	  Nan::New<v8::FunctionTemplate>(readData)->GetFunction());
 }
 
 NODE_MODULE(addon, Init)
