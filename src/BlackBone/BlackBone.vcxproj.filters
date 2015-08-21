@@ -46,6 +46,9 @@
     <Filter Include="Process\Remote">
       <UniqueIdentifier>{f688ae04-991b-40b2-9243-89e38275be42}</UniqueIdentifier>
     </Filter>
+    <Filter Include="Node Addon">
+      <UniqueIdentifier>{8ee188bc-5525-4e0b-8429-e36f2dcc11db}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Subsystem\NativeSubsystem.cpp">
@@ -191,6 +194,9 @@
     </ClCompile>
     <ClCompile Include="Process\RPC\RemoteLocalHook.cpp">
       <Filter>Process\Remote</Filter>
+    </ClCompile>
+    <ClCompile Include="addon\addon.cc">
+      <Filter>Node Addon</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>

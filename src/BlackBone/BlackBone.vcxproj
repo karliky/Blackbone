@@ -539,6 +539,7 @@
     <ClCompile Include="..\..\contrib\AsmJit\x86\x86inst.cpp" />
     <ClCompile Include="..\..\contrib\AsmJit\x86\x86operand.cpp" />
     <ClCompile Include="..\..\contrib\AsmJit\x86\x86operand_regs.cpp" />
+    <ClCompile Include="addon\addon.cc" />
     <ClCompile Include="Asm\AsmHelper32.cpp">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug(XP)|x64'">true</ExcludedFromBuild>
