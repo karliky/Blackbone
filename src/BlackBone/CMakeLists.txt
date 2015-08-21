@@ -9,7 +9,7 @@ add_definitions(-DBLACKBONE_STATIC)
 if("$ENV{PROCESSOR_ARCHITEW6432}" STREQUAL "")
   if("$ENV{PROCESSOR_ARCHITECTURE}" STREQUAL "x86")
     find_library(BEA_ENGINE_LIB
-          NAMES BeaEngine BeaEngine.lib
+          NAMES BeaEngine.lib.thelib
           PATHS ../../contrib/BeaEngine
                 ../../contrib/BeaEngine/Win32
                 ../../contrib/BeaEngine/Win32/Dll
@@ -17,7 +17,7 @@ if("$ENV{PROCESSOR_ARCHITEW6432}" STREQUAL "")
           NO_DEFAULT_PATH)
   else()
     find_library(BEA_ENGINE_LIB
-        NAMES BeaEngine64 BeaEngine64.lib
+        NAMES BeaEngine64.lib.thelib
         PATHS ../../contrib/BeaEngine
               ../../contrib/BeaEngine/Win64
               ../../contrib/BeaEngine/Win64/Dll
@@ -27,7 +27,7 @@ if("$ENV{PROCESSOR_ARCHITEW6432}" STREQUAL "")
 else()
   if("$ENV{PROCESSOR_ARCHITECTURE}" STREQUAL "x86")
     find_library(BEA_ENGINE_LIB
-        NAMES BeaEngine64 BeaEngine64.lib
+        NAMES BeaEngine64.lib.thelib
         PATHS ../../contrib/BeaEngine
               ../../contrib/BeaEngine/Win64
               ../../contrib/BeaEngine/Win64/Dll
