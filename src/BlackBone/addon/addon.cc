@@ -48,10 +48,21 @@ void readData(const Nan::FunctionCallbackInfo<v8::Value>& info) {
 	info.GetReturnValue().Set(rtnValue);
 }
 
+void writeData(const Nan::FunctionCallbackInfo<v8::Value>& info) {
+	std::wcout << L"\nWriting data... ";
+
+	int rtnValue = 0;
+	proc.memory().Write(0x7FF97E7D1BD8, sizeof(rtnValue), &rtnValue);
+
+	info.GetReturnValue().Set(rtnValue);
+}
+
 void Init(v8::Local<v8::Object> exports) {
   exports->Set(Nan::New("searchProcess").ToLocalChecked(),
 	  Nan::New<v8::FunctionTemplate>(searchProcess)->GetFunction());
   exports->Set(Nan::New("readData").ToLocalChecked(),
+	  Nan::New<v8::FunctionTemplate>(readData)->GetFunction());
+  exports->Set(Nan::New("writeData").ToLocalChecked(),
 	  Nan::New<v8::FunctionTemplate>(readData)->GetFunction());
 }
 
