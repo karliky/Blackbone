@@ -1,6 +1,6 @@
 #pragma once
 
-#include "AsmHelperBase.h"
+#include "IAsmHelper.h"
 
 namespace blackbone
 {
@@ -8,7 +8,7 @@ namespace blackbone
 /// <summary>
 /// 32 bit assembler helper
 /// </summary>
-class AsmHelper32 : public AsmHelperBase
+class AsmHelper32 : public IAsmHelper
 {
 public:
     BLACKBONE_API AsmHelper32( );
@@ -25,7 +25,7 @@ public:
     /// </summary>
     /// <param name="switchMode">Unused</param>
     /// <param name="retSize">Stack change value</param>
-    virtual void GenEpilogue( bool switchMode = false, int retSize = 4 );
+    virtual void GenEpilogue( bool switchMode = false, int retSize = -1 );
 
     /// <summary>
     /// Generate function call
@@ -33,14 +33,14 @@ public:
     /// <param name="pFN">Function pointer</param>
     /// <param name="args">Function arguments</param>
     /// <param name="cc">Calling convention</param>
-    virtual void GenCall( const AsmVariant& pFN, const std::vector<AsmVariant>& args, eCalligConvention cc = cc_stdcall );
+    virtual void GenCall( const AsmFunctionPtr& pFN, const std::vector<AsmVariant>& args, eCalligConvention cc = cc_stdcall );
 
     /// <summary>
     /// Save eax value and terminate current thread
     /// </summary>
     /// <param name="pExitThread">NtTerminateThread address</param>
-    /// <param name="resultPtr">Memry where eax value will be saved</param>
-    virtual void ExitThreadWithStatus( size_t pExitThread, size_t resultPtr );
+    /// <param name="resultPtr">Memory where eax value will be saved</param>
+    virtual void ExitThreadWithStatus( uint64_t pExitThread, uint64_t resultPtr );
 
     /// <summary>
     /// Save return value and signal thread return event
@@ -51,10 +51,10 @@ public:
     /// <param name="errPtr">Error code memory location</param>
     /// <param name="rtype">Return type</param>
     virtual void SaveRetValAndSignalEvent( 
-        size_t pSetEvent, 
-        size_t ResultPtr,
-        size_t EventPtr,
-        size_t errPtr,
+        uint64_t pSetEvent,
+        uint64_t ResultPtr,
+        uint64_t EventPtr,
+        uint64_t errPtr,
         eReturnType rtype = rt_int32
         );
 
@@ -63,15 +63,6 @@ public:
     /// </summary>
     /// <param name="">Unused</param>
     virtual void EnableX64CallStack( bool ) { }
-
-    /// <summary>
-    /// Move TEB pointer into edx
-    /// </summary>
-    virtual void SetTebPtr()
-    {
-        // mov edx, fs:[0x18]   
-        _assembler.mov( asmjit::host::edx, asmjit::host::dword_ptr_abs( 0x18 ).setSegment( asmjit::host::fs ) );
-    }
 
 private:
     AsmHelper32( const AsmHelper32& ) = delete;

@@ -4,7 +4,8 @@
 #include "RPC/RemoteExec.h"
 #include "../Misc/NameResolve.h"
 #include "../Misc/Utils.h"
-#include "../Asm/AsmHelper.h"
+#include "../Symbols/SymbolData.h"
+#include "../Asm/AsmFactory.h"
 
 #include <memory>
 #include <type_traits>
@@ -14,14 +15,10 @@
 #include <metahost.h>
 #endif
 
-#include <VersionHelpers.h>
+#include <3rd_party/VersionApi.h>
 
 namespace blackbone
 {
-
-typedef std::unique_ptr<std::remove_pointer<HANDLE>::type, decltype(&CloseHandle)> handlePtr;
-
-
 ProcessModules::ProcessModules( class Process& proc )
     : _proc( proc )
     , _memory( _proc.memory() )
@@ -41,7 +38,7 @@ ProcessModules::~ProcessModules()
 /// <param name="type">Module type. 32 bit or 64 bit</param>
 /// <param name="search">Saerch type.</param>
 /// <returns>Module data. nullptr if not found</returns>
-const ModuleData* ProcessModules::GetModule(
+ModuleDataPtr ProcessModules::GetModule(
     const std::wstring& name,
     eModSeachType search /*= LdrList*/,
     eModType type /*= mt_default*/
@@ -54,41 +51,36 @@ const ModuleData* ProcessModules::GetModule(
 /// <summary>
 /// Get module by name
 /// </summary>
-/// <param name="name">TModule name.</param>
+/// <param name="name">Module name.</param>
+/// <param name="search">Search type.</param>
 /// <param name="type">Module type. 32 bit or 64 bit</param>
 /// <param name="baseModule">Import module name. Used only to resolve ApiSchema during manual map</param>
 /// <returns>Module data. nullptr if not found</returns>
-const ModuleData* ProcessModules::GetModule(
+ModuleDataPtr ProcessModules::GetModule(
     std::wstring& name,
     eModSeachType search /*= LdrList*/,
     eModType type /*= mt_default*/,
     const wchar_t* baseModule /*= L""*/
     )
 {
-    NameResolve::Instance().ResolvePath( name, Utils::StripPath( baseModule ), L"", NameResolve::ApiSchemaOnly, _core.pid() );
+    NameResolve::Instance().ResolvePath( name, Utils::StripPath( baseModule ), L"", NameResolve::ApiSchemaOnly, _proc );
 
     // Detect module type
     if (type == mt_default)
-        type = _core.native()->GetWow64Barrier().targetWow64 ? mt_mod32 : mt_mod64;
+        type = _proc.barrier().targetWow64 ? mt_mod32 : mt_mod64;
 
     CSLock lck( _modGuard );
 
     auto key = std::make_pair( name, type );
 
     // Fast lookup
-    if (_modules.count( key ) && (_modules[key].manual || ValidateModule( _modules[key].baseAddress )))
-        return &_modules[key];
+    if (_modules.count( key ) && (_modules[key]->manual || ValidateModule( _modules[key]->baseAddress )))
+        return _modules[key];
 
-    // Enum all process modules
-    Native::listModules modules;
-    _core.native()->EnumModules( modules, search, type );
-    
-    // Update local cache
-    for (auto& mod : modules)
-        _modules.emplace( std::make_pair( std::make_pair( mod.name, mod.type ), mod ) );
+    UpdateModuleCache( search, type );
 
     if (_modules.count( key ))
-        return &_modules[key];
+        return _modules[key];
 
     return nullptr;
 }
@@ -97,43 +89,42 @@ const ModuleData* ProcessModules::GetModule(
 /// Get module by base address
 /// </summary>
 /// <param name="modBase">Module base address</param>
+/// <param name="strict">If true modBase must exactly match module base address</param>
+/// <param name="search">Search type.</param>
 /// <param name="type">Module type. 32 bit or 64 bit</param>
-/// <param name="search">Saerch type.</param>
 /// <returns>Module data. nullptr if not found</returns>
-const ModuleData* ProcessModules::GetModule(
+ModuleDataPtr ProcessModules::GetModule(
     module_t modBase,
+    bool strict /*= true*/,
     eModSeachType search /*= LdrList*/,
     eModType type /*= mt_default */
     )
 {
     // Detect module type
     if (type == mt_default)
-        type = _core.native()->GetWow64Barrier().targetWow64 ? mt_mod32 : mt_mod64;
+        type = _proc.barrier().targetWow64 ? mt_mod32 : mt_mod64;
 
     CSLock lck( _modGuard );
 
-    auto compFn = [modBase]( const mapModules::value_type& val )
+    auto compFn = [modBase, strict]( const mapModules::value_type& val )
     { 
-        return (val.second.baseAddress == modBase); 
+        if (strict)
+            return (val.second->baseAddress == modBase);
+        else
+            return (modBase >= val.second->baseAddress && modBase < val.second->baseAddress + val.second->size);
     };
 
-    auto iter = std::find_if( _modules.begin( ), _modules.end( ), compFn );
+    auto iter = std::find_if( _modules.begin(), _modules.end(), compFn );
 
     if (iter != _modules.end())
-        return &iter->second;
+        return iter->second;
 
-    // Enum all process modules
-    Native::listModules modules;
-    _core.native()->EnumModules( modules, search, type );
-
-    // Update local cache
-    for (auto& mod : modules)
-        _modules.emplace( std::make_pair( std::make_pair( mod.name, mod.type ), mod ) );
+    UpdateModuleCache( search , type );
 
     iter = std::find_if( _modules.begin(), _modules.end(), compFn );
 
     if (iter != _modules.end())
-        return &iter->second;
+        return iter->second;
     else
         return nullptr;
 }
@@ -142,22 +133,20 @@ const ModuleData* ProcessModules::GetModule(
 /// Get process main module
 /// </summary>
 /// <returns>Module data. nullptr if not found</returns>
-const ModuleData* ProcessModules::GetMainModule()
+ModuleDataPtr ProcessModules::GetMainModule()
 {
-    if (_core.native()->GetWow64Barrier().x86OS)
+    if (_proc.barrier().targetWow64)
     {
-        _PEB32 peb = { { { 0 } } };
-
-        if (_proc.core().peb( &peb ) == 0)
+        _PEB32 peb = { 0 };
+        if (_proc.core().peb32( &peb ) == 0)
             return nullptr;
 
         return GetModule( peb.ImageBaseAddress );
     }
     else
     {
-        _PEB64 peb = { { { 0 } } };
-
-        if (_proc.core().peb( &peb ) == 0)
+        _PEB64 peb = { 0 };
+        if (_proc.core().peb64( &peb ) == 0)
             return nullptr;
 
         return GetModule( peb.ImageBaseAddress );
@@ -171,36 +160,24 @@ const ModuleData* ProcessModules::GetMainModule()
 /// <returns>Module list</returns>
 const ProcessModules::mapModules& ProcessModules::GetAllModules( eModSeachType search /*= LdrList*/ )
 {
-    Native::listModules modules, modules2;
     eModType mt = _core.isWow64() ? mt_mod32 : mt_mod64;
-
-    _core.native()->EnumModules( modules, search, mt );
-
     CSLock lck( _modGuard );
 
     // Remove non-manual modules
     for (auto iter = _modules.begin(); iter != _modules.end();)
     {
-        if (!iter->second.manual) 
+        if (!iter->second->manual) 
             _modules.erase( iter++ );
         else 
             ++iter;
     }
 
-    // Update local cache
-    for (auto& mod : modules)
-        _modules.emplace( std::make_pair( std::make_pair( mod.name, mod.type ), mod ) );
+    UpdateModuleCache( search, mt );
 
     // Do additional search in case of loader lists
     // This, however won't search for 32 bit modules in native x64 process
     if (search == LdrList && mt == mt_mod32)
-    {
-        _core.native()->EnumModules( modules2, search, mt_mod64 );
-
-        // Update local cache
-        for (auto& mod : modules2)
-            _modules.emplace( std::make_pair( std::make_pair( mod.name, mod.type ), mod ) );
-    }
+        UpdateModuleCache( search, mt_mod64 );
 
     return _modules;
 }
@@ -208,14 +185,17 @@ const ProcessModules::mapModules& ProcessModules::GetAllModules( eModSeachType s
 /// <summary>
 /// Get list of manually mapped modules
 /// </summary>
-/// <param name="mods">List of modules</param>
-void ProcessModules::GetManualModules( ProcessModules::mapModules& mods )
+/// <returns>List of modules</returns>
+ProcessModules::mapModules ProcessModules::GetManualModules()
 {
-    mods.clear();
+    ProcessModules::mapModules mods;
+    std::copy_if( 
+        _modules.begin(), _modules.end(), 
+        std::inserter( mods, mods.end() ), 
+        []( const auto& mod ) { return mod.second->manual; } 
+    );
 
-    for (auto& mod: _modules)
-        if (mod.second.manual)
-            mods.emplace( mod );
+    return mods;
 }
 
 /// <summary>
@@ -225,35 +205,44 @@ void ProcessModules::GetManualModules( ProcessModules::mapModules& mods )
 /// <param name="name_ord">Function name or ordinal</param>
 /// <param name="baseModule">Import module name. Only used to resolve ApiSchema during manual map.</param>
 /// <returns>Export info. If failed procAddress field is 0</returns>
-exportData ProcessModules::GetExport( const ModuleData* hMod, const char* name_ord, const wchar_t* baseModule /*= L""*/ )
+call_result_t<exportData> ProcessModules::GetExport( const ModuleDataPtr& hMod, const char* name_ord, const wchar_t* baseModule /*= L""*/ )
+{
+    return GetExport( *hMod, name_ord, baseModule );
+}
+
+/// <summary>
+/// Get export address. Forwarded exports will be automatically resolved if forward module is present
+/// </summary>
+/// <param name="hMod">Module to search in</param>
+/// <param name="name_ord">Function name or ordinal</param>
+/// <param name="baseModule">Import module name. Only used to resolve ApiSchema during manual map.</param>
+/// <returns>Export info. If failed procAddress field is 0</returns>
+call_result_t<exportData> ProcessModules::GetExport( const ModuleData& hMod, const char* name_ord, const wchar_t* baseModule /*= L"0"*/ )
 {
     exportData data;
 
-    /// Invalid module
-    if (hMod == nullptr || hMod->baseAddress == 0)
-    {  
-        LastNtStatus( STATUS_INVALID_PARAMETER_1 );
-        return data;
-    }
-    
+    // Invalid module
+    if (hMod.baseAddress == 0)
+        return STATUS_INVALID_PARAMETER_1;
+
     std::unique_ptr<IMAGE_EXPORT_DIRECTORY, decltype(&free)> expData( nullptr, &free );
 
     IMAGE_DOS_HEADER hdrDos = { 0 };
-    uint8_t hdrNt32[sizeof(IMAGE_NT_HEADERS64)] = { 0 };
+    uint8_t hdrNt32[sizeof( IMAGE_NT_HEADERS64 )] = { 0 };
     auto phdrNt32 = reinterpret_cast<PIMAGE_NT_HEADERS32>(hdrNt32);
     auto phdrNt64 = reinterpret_cast<PIMAGE_NT_HEADERS64>(hdrNt32);
     DWORD expSize = 0;
-    size_t expBase = 0;
+    uintptr_t expBase = 0;
 
-    _memory.Read( hMod->baseAddress, sizeof(hdrDos), &hdrDos );
+    _memory.Read( hMod.baseAddress, sizeof( hdrDos ), &hdrDos );
 
     if (hdrDos.e_magic != IMAGE_DOS_SIGNATURE)
-        return data;
+        return STATUS_INVALID_IMAGE_NOT_MZ;
 
-    _memory.Read( hMod->baseAddress + hdrDos.e_lfanew, sizeof(IMAGE_NT_HEADERS64), &hdrNt32 );
+    _memory.Read( hMod.baseAddress + hdrDos.e_lfanew, sizeof( IMAGE_NT_HEADERS64 ), &hdrNt32 );
 
     if (phdrNt32->Signature != IMAGE_NT_SIGNATURE)
-        return data;
+        return STATUS_INVALID_IMAGE_FORMAT;
 
     if (phdrNt32->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC)
         expBase = phdrNt32->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress;
@@ -271,16 +260,32 @@ exportData ProcessModules::GetExport( const ModuleData* hMod, const char* name_o
         expData.reset( reinterpret_cast<IMAGE_EXPORT_DIRECTORY*>(malloc( expSize )) );
         IMAGE_EXPORT_DIRECTORY* pExpData = expData.get();
 
-        _memory.Read( hMod->baseAddress + expBase, expSize, pExpData );
+        if( auto status = _memory.Read( hMod.baseAddress + expBase, expSize, pExpData ); !NT_SUCCESS( status ) )
+            return status;
 
-        WORD *pAddressOfOrds = reinterpret_cast<WORD*> (
-            pExpData->AddressOfNameOrdinals + reinterpret_cast<size_t>(pExpData) - expBase);
+        // Fix invalid directory size
+        if (expSize <= sizeof( IMAGE_EXPORT_DIRECTORY ))
+        {
+            // New size should take care of max number of present names (max name length is assumed to be 255 chars)
+            expSize = static_cast<DWORD>(
+                pExpData->AddressOfNameOrdinals - expBase
+                + max( pExpData->NumberOfFunctions, pExpData->NumberOfNames ) * 255
+                );
 
-        DWORD *pAddressOfNames = reinterpret_cast<DWORD*>(
-            pExpData->AddressOfNames + reinterpret_cast<size_t>(pExpData) - expBase);
+            expData.reset( reinterpret_cast<IMAGE_EXPORT_DIRECTORY*>(malloc( expSize )) );
+            pExpData = expData.get();
+            if (auto status = _memory.Read( hMod.baseAddress + expBase, expSize, pExpData ); !NT_SUCCESS( status ))
+                return status;
+        }
 
-        DWORD *pAddressOfFuncs = reinterpret_cast<DWORD*>(
-            pExpData->AddressOfFunctions + reinterpret_cast<size_t>(pExpData) - expBase);
+        WORD* pAddressOfOrds = reinterpret_cast<WORD*>(
+            pExpData->AddressOfNameOrdinals + reinterpret_cast<uintptr_t>(pExpData) - expBase);
+
+        DWORD* pAddressOfNames = reinterpret_cast<DWORD*>(
+            pExpData->AddressOfNames + reinterpret_cast<uintptr_t>(pExpData) - expBase);
+
+        DWORD* pAddressOfFuncs = reinterpret_cast<DWORD*>(
+            pExpData->AddressOfFunctions + reinterpret_cast<uintptr_t>(pExpData) - expBase);
 
         for (DWORD i = 0; i < pExpData->NumberOfFunctions; ++i)
         {
@@ -288,31 +293,31 @@ exportData ProcessModules::GetExport( const ModuleData* hMod, const char* name_o
             char *pName = nullptr;
 
             // Find by index
-            if (reinterpret_cast<size_t>(name_ord) <= 0xFFFF)
+            if (reinterpret_cast<uintptr_t>(name_ord) <= 0xFFFF)
             {
                 OrdIndex = static_cast<WORD>(i);
             }
             // Find by name
-            else if (reinterpret_cast<size_t>(name_ord) > 0xFFFF && i < pExpData->NumberOfNames)
+            else if (reinterpret_cast<uintptr_t>(name_ord) > 0xFFFF && i < pExpData->NumberOfNames)
             {
-                pName = (char*)(pAddressOfNames[i] + reinterpret_cast<size_t>(pExpData) - expBase);
+                pName = (char*)(pAddressOfNames[i] + reinterpret_cast<uintptr_t>(pExpData) - expBase);
                 OrdIndex = static_cast<WORD>(pAddressOfOrds[i]);
             }
             else
-                return data;
+                return STATUS_NOT_FOUND;
 
-            if ((reinterpret_cast<size_t>(name_ord) <= 0xFFFF && (WORD)((uintptr_t)name_ord) == (OrdIndex + pExpData->Base)) ||
-                 (reinterpret_cast<size_t>(name_ord) > 0xFFFF && strcmp( pName, name_ord ) == 0))
+            if ((reinterpret_cast<uintptr_t>(name_ord) <= 0xFFFF && (WORD)((uintptr_t)name_ord) == (OrdIndex + pExpData->Base)) ||
+                (reinterpret_cast<uintptr_t>(name_ord) > 0xFFFF && strcmp( pName, name_ord ) == 0))
             {
-                data.procAddress = pAddressOfFuncs[OrdIndex] + hMod->baseAddress;
+                data.procAddress = pAddressOfFuncs[OrdIndex] + hMod.baseAddress;
 
                 // Check forwarded export
-                if (data.procAddress >= hMod->baseAddress + expBase && 
-                    data.procAddress <= hMod->baseAddress + expBase + expSize)
+                if (data.procAddress >= hMod.baseAddress + expBase &&
+                    data.procAddress <= hMod.baseAddress + expBase + expSize)
                 {
                     char forwardStr[255] = { 0 };
 
-                    _memory.Read( data.procAddress, sizeof(forwardStr), forwardStr );
+                    _memory.Read( data.procAddress, sizeof( forwardStr ), forwardStr );
 
                     std::string chainExp( forwardStr );
 
@@ -330,10 +335,11 @@ exportData ProcessModules::GetExport( const ModuleData* hMod, const char* name_o
                     else
                         data.forwardName = strName;
 
+                    // Check if forward mod is loaded
                     auto mt = (phdrNt32->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC) ? mt_mod32 : mt_mod64;
                     auto hChainMod = GetModule( wDll, LdrList, mt, baseModule );
                     if (hChainMod == nullptr)
-                        return data;
+                        return call_result_t<exportData>( data, STATUS_SOME_NOT_MAPPED );
 
                     // Import by ordinal
                     if (data.forwardByOrd)
@@ -343,12 +349,43 @@ exportData ProcessModules::GetExport( const ModuleData* hMod, const char* name_o
                         return GetExport( hChainMod, strName.c_str(), wDll.c_str() );
                 }
 
-                break;
+                return data;
             }
         }
     }
 
-    return data;
+    return STATUS_NOT_FOUND;
+}
+
+/// <summary>
+/// Get export address. Forwarded exports will be automatically resolved if forward module is present
+/// </summary>
+/// <param name="modName">Module name to search in</param>
+/// <param name="name_ord">Function name or ordinal</param>
+/// <returns>Export info. If failed procAddress field is 0</returns>
+call_result_t<exportData> ProcessModules::GetExport( const std::wstring& modName, const char* name_ord )
+{
+    return GetExport( GetModule( modName ), name_ord );
+}
+
+/// <summary>
+/// Get export from ntdll
+/// </summary>
+/// <param name="name_ord">Function name or ordinal</param>
+/// <param name="type">Module type. 32 bit or 64 bit</param>
+/// <param name="search">Search type.</param>
+/// <returns>Export info. If failed procAddress field is 0</returns>
+call_result_t<exportData> ProcessModules::GetNtdllExport( 
+    const char* name_ord,
+    eModType type /*= mt_default*/, 
+    eModSeachType search /*= LdrList */ 
+    )
+{
+    auto mod = GetModule( L"ntdll.dll", search, type );
+    if (!mod)
+        return STATUS_NOT_FOUND;
+
+    return GetExport( mod, name_ord );
 }
 
 /// <summary>
@@ -357,95 +394,120 @@ exportData ProcessModules::GetExport( const ModuleData* hMod, const char* name_o
 /// <param name="path">Full-qualified image path</param>
 /// <param name="pStatus">Injection status code</param>
 /// <returns>Module info. nullptr if failed</returns>
-const ModuleData* ProcessModules::Inject( const std::wstring& path, NTSTATUS* pStatus /*= nullptr*/ )
+call_result_t<ModuleDataPtr> ProcessModules::Inject( const std::wstring& path, ThreadPtr pThread /*= nullptr*/ )
 {
     NTSTATUS status = STATUS_SUCCESS;
-    const ModuleData* mod = nullptr;
-    ptr_t res = 0;
-    auto& barrier = _core.native()->GetWow64Barrier();
-    
-    AsmJitHelper a;
+    ModuleDataPtr mod;
     pe::PEImage img;
+    uint32_t ustrSize = 0;
+    ptr_t res = 0;    
 
     img.Load( path, true );
     img.Release();
 
     // Already loaded
-    if ((mod = GetModule( path, LdrList, img.mType() )) != nullptr)
-    {
-        if (pStatus)
-            *pStatus = STATUS_IMAGE_ALREADY_LOADED;
-
-        return mod;
-    }
+    if (mod = GetModule( path, LdrList, img.mType() ))
+        return call_result_t<ModuleDataPtr>( mod, STATUS_IMAGE_ALREADY_LOADED );
 
     // Image path
-    UNICODE_STRING ustr = { 0 };
     auto modName = _memory.Allocate( 0x1000, PAGE_READWRITE );
+    if (!modName)
+        return modName.status;
 
-    ustr.Buffer = reinterpret_cast<PWSTR>(modName.ptr<size_t>() + sizeof(ustr));
-    ustr.Length = static_cast<USHORT>(path.size() * sizeof(wchar_t));
-    ustr.MaximumLength = ustr.Length;
+    // Write dll name into target process
+    auto fillDllName = [&modName, &path]( auto& ustr )
+    {
+        ustr.Buffer = modName->ptr<std::decay_t<decltype(ustr)>::type>() + sizeof( ustr );
+        ustr.MaximumLength = ustr.Length = static_cast<USHORT>(path.size() * sizeof( wchar_t ));
 
-    modName.Write( 0, ustr );
-    modName.Write( sizeof(ustr), path.size() * sizeof(wchar_t), path.c_str() );
+        modName->Write( 0, ustr );
+        modName->Write( sizeof( ustr ), path.size() * sizeof( wchar_t ), path.c_str() );
+
+        return static_cast<uint32_t>(sizeof( ustr ));
+    };
+
+    if (img.mType() == mt_mod32)
+    {
+        _UNICODE_STRING32 ustr = { 0 };
+        ustrSize = fillDllName( ustr );
+    }
+    else if (img.mType() == mt_mod64)
+    {
+        _UNICODE_STRING64 ustr = { 0 };
+        ustrSize = fillDllName( ustr );      
+    }
+    else
+        return STATUS_INVALID_IMAGE_FORMAT;
 
     // Image and process have same processor architecture
     bool sameArch = (img.mType() == mt_mod64 && _core.isWow64() == false) || (img.mType() == mt_mod32 && _core.isWow64() == true);
-    auto pLoadLibrary = GetExport( GetModule( L"kernel32.dll", LdrList, img.mType() ), "LoadLibraryW" ).procAddress;
+    auto pLoadLibrary = GetExport( GetModule( L"kernel32.dll", LdrList, img.mType() ), "LoadLibraryW" );
 
-    // Try to use LoadLibrary if possible
-    if (pLoadLibrary != 0 && sameArch)
+    // Can't inject 32bit dll into native process
+    if (!_proc.core().isWow64() && img.mType() == mt_mod32)
+        return STATUS_INVALID_IMAGE_WIN_32;
+
+    auto switchMode = NoSwitch;
+    if (_proc.core().isWow64() && img.mType() == mt_mod64)
+        switchMode = ForceSwitch;
+
+    auto pLdrLoadDll = GetNtdllExport( "LdrLoadDll", img.mType(), Sections );
+    if (!pLdrLoadDll)
+        return pLdrLoadDll.status;
+
+    // Patch LdrFindOrMapDll to enable kernel32.dll loading
+    if (switchMode == ForceSwitch && !_ldrPatched && IsWindows7OrGreater() && !IsWindows8OrGreater())
     {
-        _proc.remote().ExecDirect( pLoadLibrary, modName.ptr() + sizeof( ustr ) );
+        uint8_t patch[] = { 0x90, 0x90, 0x90, 0x90, 0x90, 0x90 };
+        auto patchBase = g_symbols.LdrKernel32PatchAddress;
+
+        if (patchBase != 0)
+        {
+            DWORD flOld = 0;
+            _memory.Protect( patchBase, sizeof( patch ), PAGE_EXECUTE_READWRITE, &flOld );
+            _memory.Write( patchBase, sizeof( patch ), patch );
+            _memory.Protect( patchBase, sizeof( patch ), flOld, nullptr );
+        }
+
+        _ldrPatched = true;
     }
-    // Can't generate code through WOW64 barrier
-    else if ((barrier.type != wow_32_64 && img.mType() == mt_mod64) ||
-              (barrier.type == wow_32_32 || barrier.type == wow_64_64) )
+
+    auto a = AsmFactory::GetAssembler( img.mType() );
+
+    a->GenCall( pLdrLoadDll->procAddress, { 0, 0, modName->ptr(), modName->ptr() + 0x800 } );
+    (*a)->ret();
+
+    _proc.remote().CreateRPCEnvironment( Worker_None, true );
+
+    // Execute call
+    if (pThread != nullptr)
     {
-        auto pLdrLoadDll = GetExport( GetModule( L"ntdll.dll", Sections, img.mType() ), "LdrLoadDll" ).procAddress;
-        if (pLdrLoadDll == 0)
-        {
-            if (pStatus)
-                *pStatus = STATUS_NOT_FOUND;
+        if (pThread == _proc.remote().getWorker())
+            status = _proc.remote().ExecInWorkerThread( (*a)->make(), (*a)->getCodeSize(), res );
+        else
+            status = _proc.remote().ExecInAnyThread( (*a)->make(), (*a)->getCodeSize(), res, pThread );
 
-            return nullptr;
-        }
-
-        // Patch LdrFindOrMapDll to enable kernel32.dll loading
-        #ifdef USE64
-        if (!_ldrPatched && IsWindows7OrGreater( ) && !IsWindows8OrGreater( ))
-        {
-            uint8_t patch[] = { 0x90, 0x90, 0x90, 0x90, 0x90, 0x90 };
-            auto patchBase = _proc.nativeLdr().LdrKernel32PatchAddress();
-
-            if (patchBase != 0)
-            {
-                DWORD flOld = 0;
-                _memory.Protect( patchBase, 6, PAGE_EXECUTE_READWRITE, &flOld );
-                _memory.Write( patchBase, sizeof(patch), patch );
-                _memory.Protect( patchBase, 6, flOld, nullptr );
-            }
-
-            _ldrPatched = true;
-        }
-        #endif
-
-        a.GenCall( (size_t)pLdrLoadDll, { 0, 0, modName.ptr<size_t>(), modName.ptr<size_t>() + 0x800 } );
-        a->ret();
-
-        status = _proc.remote().ExecInNewThread( a->make(), a->getCodeSize(), res );
+        if (NT_SUCCESS( status ))
+            status = static_cast<NTSTATUS>(res);
+    }
+    else
+    {
+        status = _proc.remote().ExecInNewThread( (*a)->make(), (*a)->getCodeSize(), res, switchMode );
         if (NT_SUCCESS( status ))
             status = static_cast<NTSTATUS>(res);
     }
 
-    if (pStatus)
-        *pStatus = status;
+    // Retry with LoadLibrary if possible
+    if (!NT_SUCCESS(status) && pLoadLibrary && sameArch)
+    {
+        auto result = _proc.remote().ExecDirect( pLoadLibrary->procAddress, modName->ptr() + ustrSize );
+        if (result == 0)
+        {
+            return status;
+        }
+    }
 
-    if (res == STATUS_SUCCESS)
-        return GetModule( path, LdrList, img.mType() );
-    else
-        return nullptr;
+    return GetModule( path, LdrList, img.mType() );
 }
 
 /// <summary>
@@ -453,38 +515,32 @@ const ModuleData* ProcessModules::Inject( const std::wstring& path, NTSTATUS* pS
 /// </summary>
 /// <param name="hMod">Module to unload</param>
 /// <returns>true on success</returns>
-bool ProcessModules::Unload( const ModuleData* hMod )
+NTSTATUS ProcessModules::Unload( const ModuleDataPtr& hMod )
 {
     // Module not present or is manually mapped
-    if (hMod == nullptr ||  hMod->manual || !ValidateModule( hMod->baseAddress ))
-    {
-        LastNtStatus( STATUS_NOT_FOUND );
-        return false;
-    }
+    if (hMod->manual || !ValidateModule( hMod->baseAddress ))
+        return STATUS_NOT_FOUND;
 
     // Unload routine
-    auto pUnload = GetExport( GetModule( L"ntdll.dll", LdrList, hMod->type ), "LdrUnloadDll" );
-    if (pUnload.procAddress == 0)
-        return false;
+    auto pUnload = GetNtdllExport( "LdrUnloadDll", hMod->type );
+    if (!pUnload)
+        return pUnload.status;
 
     // Special case for unloading 64 bit modules from WOW64 process
+    auto threadSwitch = NoSwitch;
     if (_proc.core().isWow64() && hMod->type == mt_mod64)
-    {
-        uint64_t res = 0;
-        
-        AsmJitHelper a;
+        threadSwitch = ForceSwitch;
 
-        a.GenCall( static_cast<size_t>(pUnload.procAddress), { static_cast<size_t>(hMod->baseAddress) } );
-        a->ret();
+    uint64_t res = 0;
+    auto a = AsmFactory::GetAssembler( hMod->type );
 
-        _proc.remote().ExecInNewThread( a->make(), a->getCodeSize(), res );
-    }
-    else
-        _proc.remote().ExecDirect( pUnload.procAddress, hMod->baseAddress );
+    a->GenCall( pUnload->procAddress, { hMod->baseAddress } );
+    (*a)->ret();
+
+    _proc.remote().ExecInNewThread( (*a)->make(), (*a)->getCodeSize(), res, threadSwitch );
 
     // Remove module from cache
     _modules.erase( std::make_pair( hMod->name, hMod->type ) );
-
     return true;
 }
 
@@ -493,9 +549,14 @@ bool ProcessModules::Unload( const ModuleData* hMod )
 /// </summary>
 /// <param name="mod">Module to unlink</param>
 /// <returns>true on success</returns>
-bool ProcessModules::Unlink( const ModuleData* mod )
+bool ProcessModules::Unlink( const ModuleDataPtr& mod )
 {
-    return _proc.nativeLdr().Unlink( mod->baseAddress, mod->name, mod->type );
+    return _proc.nativeLdr().Unlink( *mod );
+}
+
+bool ProcessModules::Unlink( const ModuleData& mod )
+{
+    return _proc.nativeLdr().Unlink( mod );
 }
 
 /// <summary>
@@ -521,26 +582,34 @@ bool ProcessModules::ValidateModule( module_t base )
 /// <summary>
 /// Store manually mapped module in module list
 /// </summary>
-/// <param name="FilePath">Full qualified module path</param>
-/// <param name="base">Base address</param>
-/// <param name="size">Module size</param>
-/// <param name="mt">Module type. 32 bit or 64 bit</param>
+/// <param name="mod">Module data</param>
 /// <returns>Module info</returns>
-const ModuleData* ProcessModules::AddManualModule( const std::wstring& FilePath, module_t base, size_t size, eModType mt )
+ModuleDataPtr ProcessModules::AddManualModule( const ModuleData& mod )
 {
-    ModuleData module;
+    auto canonicalized = Canonicalize( mod, true );
+    auto key = std::make_pair( canonicalized.name, canonicalized.type );
+    return _modules.emplace( key, std::make_shared<const ModuleData>( canonicalized ) ).first->second;
+}
 
-    module.fullPath = Utils::ToLower( FilePath );
-    module.baseAddress = base;
-    module.size = size;
-    module.name = Utils::ToLower( Utils::StripPath( FilePath ) );
-    module.manual = true;
-    module.type = mt;
+/// <summary>
+/// Canonicalize paths and set module type to manual if requested
+/// </summary>
+/// <param name="mod">Module data</param>
+/// <param name="manual">Value to set ModuleData::manual to</param>
+/// <returns>Module data</returns>
+ModuleData ProcessModules::Canonicalize( const ModuleData& mod, bool manual )
+{
+    ModuleData result = {};
 
-    auto key = std::make_pair( module.name, module.type );
-    _modules.emplace( std::make_pair( key, module ) );
+    result.baseAddress = mod.baseAddress;
+    result.ldrPtr = mod.ldrPtr;
+    result.size = mod.size;
+    result.type = mod.type;
+    result.fullPath = Utils::ToLower( mod.fullPath );
+    result.name = Utils::ToLower( mod.name );
+    result.manual = manual;
 
-    return &_modules.find( key )->second;
+    return result;
 }
 
 /// <summary>
@@ -550,16 +619,15 @@ const ModuleData* ProcessModules::AddManualModule( const std::wstring& FilePath,
 /// <param name="mt">Module type. 32 bit or 64 bit</param>
 void ProcessModules::RemoveManualModule( const std::wstring& filename, eModType mt )
 {
-    auto key = std::make_pair( filename, mt );
-
+    auto key = std::make_pair( Utils::ToLower( Utils::StripPath( filename ) ), mt );
     if (_modules.count( key ))
         _modules.erase( key );
 }
 
-// DWORD alignment
-inline size_t DWAlign( size_t offset )
+void ProcessModules::UpdateModuleCache( eModSeachType search, eModType type )
 {
-    return offset % sizeof(size_t) == 0 ? offset : offset + (sizeof(size_t)-offset % sizeof(size_t));;
+    for (const auto& mod : _core.native()->EnumModules( search, type ))
+        _modules.emplace( std::make_pair( mod->name, mod->type ), mod );
 }
 
 
@@ -595,24 +663,31 @@ bool ProcessModules::InjectPureIL(
     tmp.erase( idx );
     std::wstring ClassName = tmp;
 
-    auto address = _memory.Allocate( 0x10000 );
+    auto mem = _memory.Allocate( 0x10000 );
+    if (!mem)
+    {
+        returnCode = 7;
+        return false;
+    }
 
-    size_t offset = 4;
-
-    size_t address_VersionString, address_netAssemblyDll, address_netAssemblyClass, 
+    auto address = std::move( mem.result() );
+    uintptr_t offset = 4;
+    uintptr_t address_VersionString, address_netAssemblyDll, address_netAssemblyClass,
            address_netAssemblyMethod, address_netAssemblyArgs;
 
     const std::wstring* strArr[] = { &netVersion, &netAssemblyPath, &ClassName, &MethodName, &netAssemblyArgs };
 
-    size_t* ofstArr[] = { &address_VersionString, &address_netAssemblyDll, &address_netAssemblyClass, 
-                          &address_netAssemblyMethod, &address_netAssemblyArgs };
+    uintptr_t* ofstArr[] = { 
+        &address_VersionString, &address_netAssemblyDll, &address_netAssemblyClass,
+        &address_netAssemblyMethod, &address_netAssemblyArgs 
+    };
 
     // Write strings
     for (int i = 0; i < ARRAYSIZE( strArr ); i++)
     {
         size_t len = strArr[i]->length();
 
-        *(ofstArr[i]) = address.ptr<size_t>() + offset;
+        *(ofstArr[i]) = address.ptr<uintptr_t>() + offset;
 
         // runtime version to use
         if (address.Write( offset, len * sizeof(wchar_t) + 2, strArr[i]->c_str( ) ) != STATUS_SUCCESS)
@@ -621,7 +696,7 @@ bool ProcessModules::InjectPureIL(
             return false;
         }
 
-        offset = DWAlign( offset + len * sizeof(wchar_t) + 2 );
+        offset = Align( offset + len * sizeof( wchar_t ) + 2, sizeof( uint64_t ) );
     }
 
     offset += 4;
@@ -635,30 +710,33 @@ bool ProcessModules::InjectPureIL(
         return false;
     }
 
-    size_t address_CLSID_CLRMetaHost    = address.ptr<size_t>() + offset + 0;
-    size_t address_IID_ICLRMetaHost     = address.ptr<size_t>() + offset + 0x10;
-    size_t address_IID_ICLRRuntimeInfo  = address.ptr<size_t>() + offset + 0x20;
-    size_t address_CLSID_CLRRuntimeHost = address.ptr<size_t>() + offset + 0x30;
-    size_t address_IID_ICLRRuntimeHost  = address.ptr<size_t>() + offset + 0x40;
+    uintptr_t address_CLSID_CLRMetaHost    = address.ptr<uintptr_t>() + offset + 0;
+    uintptr_t address_IID_ICLRMetaHost     = address.ptr<uintptr_t>() + offset + 0x10;
+    uintptr_t address_IID_ICLRRuntimeInfo  = address.ptr<uintptr_t>() + offset + 0x20;
+    uintptr_t address_CLSID_CLRRuntimeHost = address.ptr<uintptr_t>() + offset + 0x30;
+    uintptr_t address_IID_ICLRRuntimeHost  = address.ptr<uintptr_t>() + offset + 0x40;
 
     offset += sizeof(GArray);
 
     std::wstring libName = L"mscoree.dll";
 
-    NameResolve::Instance().ResolvePath( libName, L"", L"", NameResolve::EnsureFullPath, 0 );
+    NameResolve::Instance().ResolvePath( libName, L"", L"", NameResolve::EnsureFullPath, _proc );
 
     auto pMscoree = Inject( libName );
     if(!pMscoree)
     {
-        returnCode = 15;
+        returnCode = pMscoree.status;
         return false;
     }
 
     // CLRCreateInstance address
-    size_t CreateInstanceAddress = (size_t)GetExport( pMscoree, "CLRCreateInstance" ).procAddress;
+    auto pfnCreateInstance = GetExport( pMscoree.result(), "CLRCreateInstance" );
+    if (!pfnCreateInstance)
+        return false;
 
     // Scary assembler code incoming!
-    AsmJitHelper a;
+    auto pAsm = AsmFactory::GetAssembler( _proc.core().isWow64() );
+    auto& a = *pAsm;
     AsmStackAllocator sa( a.assembler(), 0x30 );   // 0x30 - 6 arguments of ExecuteInDefaultAppDomain
 
     // Stack will be reserved manually
@@ -697,7 +775,7 @@ bool ProcessModules::InjectPureIL(
     a->xor_( a->zsi, a->zsi );
 
     // CLRCreateInstance()
-    a.GenCall( (size_t)CreateInstanceAddress, { address_CLSID_CLRMetaHost, address_IID_ICLRMetaHost, &stack_MetaHost } );
+    a.GenCall( (uintptr_t)pfnCreateInstance->procAddress, { address_CLSID_CLRMetaHost, address_IID_ICLRMetaHost, &stack_MetaHost } );
     // success?
     a->test( a->zax, a->zax );
     a->jnz( L_Error1 );
@@ -765,7 +843,7 @@ bool ProcessModules::InjectPureIL(
     // Write the managed code's return value to the first DWORD
     // in the allocated buffer
     a->mov( eax, stack_returnCode );
-    a->mov( a->zdx, address.ptr<size_t>() );
+    a->mov( a->zdx, address.ptr<uintptr_t>() );
     a->mov( dword_ptr( a->zdx ), eax );
     a->mov( a->zax, 0 );
 
@@ -846,7 +924,7 @@ bool ProcessModules::InjectPureIL(
 
     // write JIT code to target
     size_t codeSize = a->getCodeSize();
-    size_t codeAddress = address.ptr<size_t>() + offset;
+    ptr_t codeAddress = address.ptr() + offset;
 
     std::vector<uint8_t> codeBuffer( codeSize );
 

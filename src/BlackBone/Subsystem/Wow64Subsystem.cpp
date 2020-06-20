@@ -1,6 +1,8 @@
 #include "Wow64Subsystem.h"
 #include "../Misc/DynImport.h"
 #include "../Include/Macro.h"
+#include <3rd_party/rewolf-wow64ext/src/wow64ext.h>
+#include "../Misc/Trace.hpp"
 
 namespace blackbone
 {
@@ -8,13 +10,6 @@ namespace blackbone
 NativeWow64::NativeWow64( HANDLE hProcess )
     : Native( hProcess )
 {
-    HMODULE ntdll32 = GetModuleHandleW( L"Ntdll.dll" );
-
-    DynImport::load( "NtWow64QueryInformationProcess64", ntdll32 );
-    DynImport::load( "NtWow64AllocateVirtualMemory64",   ntdll32 );
-    DynImport::load( "NtWow64QueryVirtualMemory64",      ntdll32 );
-    DynImport::load( "NtWow64ReadVirtualMemory64",       ntdll32 );
-    DynImport::load( "NtWow64WriteVirtualMemory64",      ntdll32 );
 }
 
 NativeWow64::~NativeWow64()
@@ -29,14 +24,14 @@ NativeWow64::~NativeWow64()
 /// <param name="flAllocationType">Allocation type</param>
 /// <param name="flProtect">Memory protection</param>
 /// <returns>Status code</returns>
-NTSTATUS NativeWow64::VirualAllocExT( ptr_t& lpAddress, size_t dwSize, DWORD flAllocationType, DWORD flProtect )
+NTSTATUS NativeWow64::VirtualAllocExT( ptr_t& lpAddress, size_t dwSize, DWORD flAllocationType, DWORD flProtect )
 {
     DWORD64 size64 = dwSize;
-    static ptr_t ntavm = _local.GetProcAddress64( _local.getNTDLL64(), "NtAllocateVirtualMemory" );
+    static ptr_t ntavm = GetProcAddress64( getNTDLL64(), "NtAllocateVirtualMemory" );
     if (ntavm == 0)
         return STATUS_ORDINAL_NOT_FOUND;
 
-    return static_cast<NTSTATUS>(_local.X64Call( ntavm, _hProcess, &lpAddress, 0, &size64, flAllocationType, flProtect ));
+    return static_cast<NTSTATUS>(X64Call( ntavm, 6, (DWORD64)_hProcess, (DWORD64)&lpAddress, 0ull, (DWORD64)&size64, (DWORD64)flAllocationType, (DWORD64)flProtect ));
 }
 
 /// <summary>
@@ -46,16 +41,16 @@ NTSTATUS NativeWow64::VirualAllocExT( ptr_t& lpAddress, size_t dwSize, DWORD flA
 /// <param name="dwSize">Region size</param>
 /// <param name="dwFreeType">Memory release type.</param>
 /// <returns>Status code</returns>
-NTSTATUS NativeWow64::VirualFreeExT( ptr_t lpAddress, size_t dwSize, DWORD dwFreeType )
+NTSTATUS NativeWow64::VirtualFreeExT( ptr_t lpAddress, size_t dwSize, DWORD dwFreeType )
 {
-    static ptr_t ntfvm = _local.GetProcAddress64( _local.getNTDLL64( ), "NtFreeVirtualMemory" );
+    static ptr_t ntfvm = GetProcAddress64( getNTDLL64(), "NtFreeVirtualMemory" );
     if (ntfvm == 0)
         return STATUS_ORDINAL_NOT_FOUND;
 
     DWORD64 tmpAddr = lpAddress;
     DWORD64 tmpSize = dwSize;
 
-    return static_cast<NTSTATUS>(_local.X64Call( ntfvm, _hProcess, &tmpAddr, &tmpSize, dwFreeType ));
+    return static_cast<NTSTATUS>(X64Call( ntfvm, 4, (DWORD64)_hProcess, (DWORD64)&tmpAddr, (DWORD64)&tmpSize, (DWORD64)dwFreeType ));
 }
 
 /// <summary>
@@ -66,11 +61,11 @@ NTSTATUS NativeWow64::VirualFreeExT( ptr_t lpAddress, size_t dwSize, DWORD dwFre
 /// <returns>Status code</returns>
 NTSTATUS NativeWow64::VirtualQueryExT( ptr_t lpAddress, PMEMORY_BASIC_INFORMATION64 lpBuffer )
 {
-    static ptr_t ntqvm = _local.GetProcAddress64( _local.getNTDLL64(), "NtQueryVirtualMemory" );
+    static ptr_t ntqvm = GetProcAddress64( getNTDLL64(), "NtQueryVirtualMemory" );
     if (ntqvm == 0)
         return STATUS_ORDINAL_NOT_FOUND;
 
-    return static_cast<NTSTATUS>(_local.X64Call( ntqvm, _hProcess, lpAddress, 0, lpBuffer, sizeof( MEMORY_BASIC_INFORMATION64 ), 0 ));
+    return static_cast<NTSTATUS>(X64Call( ntqvm, 6, (DWORD64)_hProcess, lpAddress, 0ull, (DWORD64)lpBuffer, (DWORD64)sizeof( MEMORY_BASIC_INFORMATION64 ), 0ull ));
 }
 
 /// <summary>
@@ -81,11 +76,11 @@ NTSTATUS NativeWow64::VirtualQueryExT( ptr_t lpAddress, PMEMORY_BASIC_INFORMATIO
 /// <returns>Status code</returns>
 NTSTATUS NativeWow64::VirtualQueryExT( ptr_t lpAddress, MEMORY_INFORMATION_CLASS infoClass, LPVOID lpBuffer, size_t bufSize )
 {
-    static ptr_t ntqvm = _local.GetProcAddress64( _local.getNTDLL64(), "NtQueryVirtualMemory" );
+    static ptr_t ntqvm = GetProcAddress64( getNTDLL64(), "NtQueryVirtualMemory" );
     if (ntqvm == 0)
         return STATUS_ORDINAL_NOT_FOUND;
 
-    return static_cast<NTSTATUS>(_local.X64Call( ntqvm, _hProcess, lpAddress, infoClass, lpBuffer, bufSize, 0 ));
+    return static_cast<NTSTATUS>(X64Call( ntqvm, 6, (DWORD64)_hProcess, lpAddress, (DWORD64)infoClass, (DWORD64)lpBuffer, (DWORD64)bufSize, 0ull ));
 }
 
 /// <summary>
@@ -98,11 +93,11 @@ NTSTATUS NativeWow64::VirtualQueryExT( ptr_t lpAddress, MEMORY_INFORMATION_CLASS
 /// <returns>Status code</returns>
 NTSTATUS NativeWow64::VirtualProtectExT( ptr_t lpAddress, DWORD64 dwSize, DWORD flProtect, DWORD* flOld )
 {
-    static ptr_t ntpvm = _local.GetProcAddress64( _local.getNTDLL64(), "NtProtectVirtualMemory" );
+    static ptr_t ntpvm = GetProcAddress64( getNTDLL64(), "NtProtectVirtualMemory" );
     if (ntpvm == 0)
         return STATUS_ORDINAL_NOT_FOUND;
 
-    return static_cast<NTSTATUS>(_local.X64Call( ntpvm, _hProcess, &lpAddress, &dwSize, flProtect, flOld ));
+    return static_cast<NTSTATUS>(X64Call( ntpvm, 5, (DWORD64)_hProcess, (DWORD64)&lpAddress, (DWORD64)&dwSize, (DWORD64)flProtect, (DWORD64)flOld ));
 }
 
 /// <summary>
@@ -118,7 +113,13 @@ NTSTATUS NativeWow64::ReadProcessMemoryT( ptr_t lpBaseAddress, LPVOID lpBuffer, 
     DWORD64 junk = 0;
     if (lpBytes == nullptr)
         lpBytes = &junk;
-
+    
+    if (_wowBarrier.targetWow64 && lpBaseAddress < NativeWow64::maxAddr32()) {
+        SetLastNtStatus(STATUS_SUCCESS);
+        ReadProcessMemory(_hProcess, reinterpret_cast<LPVOID>(lpBaseAddress), lpBuffer, nSize, reinterpret_cast<SIZE_T*>(lpBytes));
+        return LastNtStatus();
+    }
+    
     return SAFE_NATIVE_CALL( NtWow64ReadVirtualMemory64, _hProcess, lpBaseAddress, lpBuffer, nSize, lpBytes );
 }
 
@@ -135,7 +136,13 @@ NTSTATUS NativeWow64::WriteProcessMemoryT( ptr_t lpBaseAddress, LPCVOID lpBuffer
     DWORD64 junk = 0;
     if (lpBytes == nullptr)
         lpBytes = &junk;
-
+    
+    if (_wowBarrier.targetWow64 && lpBaseAddress < NativeWow64::maxAddr32()) {
+        SetLastNtStatus(STATUS_SUCCESS);
+        WriteProcessMemory(_hProcess, reinterpret_cast<LPVOID>(lpBaseAddress), lpBuffer, nSize, reinterpret_cast<SIZE_T*>(lpBytes));
+        return LastNtStatus();
+    }
+    
     return SAFE_NATIVE_CALL( NtWow64WriteVirtualMemory64, _hProcess, lpBaseAddress, (LPVOID)lpBuffer, nSize, lpBytes );
 }
 
@@ -149,6 +156,10 @@ NTSTATUS NativeWow64::WriteProcessMemoryT( ptr_t lpBaseAddress, LPCVOID lpBuffer
 NTSTATUS NativeWow64::QueryProcessInfoT( PROCESSINFOCLASS infoClass, LPVOID lpBuffer, uint32_t bufSize )
 {
     ULONG length = 0;
+    
+     //if (_wowBarrier.targetWow64)
+     //    return SAFE_NATIVE_CALL( NtQueryInformationProcess, _hProcess, infoClass, lpBuffer, bufSize, &length );
+    
     return SAFE_NATIVE_CALL( NtWow64QueryInformationProcess64, _hProcess, infoClass, lpBuffer, bufSize, &length );
 }
 
@@ -162,11 +173,11 @@ NTSTATUS NativeWow64::QueryProcessInfoT( PROCESSINFOCLASS infoClass, LPVOID lpBu
 /// <returns>Status code</returns>
 NTSTATUS NativeWow64::SetProcessInfoT( PROCESSINFOCLASS infoClass, LPVOID lpBuffer, uint32_t bufSize )
 {
-    static ptr_t ntspi = _local.GetProcAddress64( _local.getNTDLL64(), "NtSetInformationProcess" );
+    static ptr_t ntspi = GetProcAddress64( getNTDLL64(), "NtSetInformationProcess" );
     if (ntspi == 0)
         return STATUS_ORDINAL_NOT_FOUND;
 
-    return static_cast<NTSTATUS>(_local.X64Call( ntspi, _hProcess, infoClass, lpBuffer, bufSize ));
+    return static_cast<NTSTATUS>(X64Call( ntspi, 4, (DWORD64)_hProcess, (DWORD64)infoClass, (DWORD64)lpBuffer, (DWORD64)bufSize ));
 }
 
 /// <summary>
@@ -186,20 +197,17 @@ NTSTATUS NativeWow64::CreateRemoteThreadT( HANDLE& hThread, ptr_t entry, ptr_t a
     }
     else*/
     {
-        LastNtStatus( STATUS_SUCCESS );
-
-        static DWORD64 NtCreateThreadEx = _local.GetProcAddress64( _local.getNTDLL64(), "NtCreateThreadEx" );
-
+        static DWORD64 NtCreateThreadEx = GetProcAddress64( getNTDLL64(), "NtCreateThreadEx" );
         if (NtCreateThreadEx == 0)
-            return LastNtStatus( STATUS_ORDINAL_NOT_FOUND );
+            return STATUS_ORDINAL_NOT_FOUND;
 
         // hThread can't be used directly because x64Call will zero stack space near variable
         DWORD64 hThd2 = NULL;
 
-        NTSTATUS status = static_cast<NTSTATUS>(_local.X64Call(
-            NtCreateThreadEx, &hThd2, access, NULL,
-            _hProcess, entry, arg, flags,
-            0, 0x1000, 0x100000, NULL
+        NTSTATUS status = static_cast<NTSTATUS>(X64Call(
+            NtCreateThreadEx, 11, (DWORD64)&hThd2, (DWORD64)access, 0ull,
+            (DWORD64)_hProcess, (DWORD64)entry, (DWORD64)arg, (DWORD64)flags,
+            0ull, 0x1000ull, 0x100000ull, 0ull
             ));
 
         hThread = reinterpret_cast<HANDLE>(hThd2);
@@ -223,9 +231,8 @@ NTSTATUS NativeWow64::GetThreadContextT( HANDLE hThread, _CONTEXT32& ctx )
     }
     else
     {
-        LastNtStatus( STATUS_SUCCESS );
-        GetThreadContext( hThread, reinterpret_cast<PCONTEXT>(&ctx) );
-        return LastNtStatus();
+        auto r = GetThreadContext(hThread, reinterpret_cast<PCONTEXT>(&ctx));
+        return r != 0 ? STATUS_SUCCESS : LastNtStatus();
     }
 }
 
@@ -238,11 +245,11 @@ NTSTATUS NativeWow64::GetThreadContextT( HANDLE hThread, _CONTEXT32& ctx )
 /// <returns>Status code</returns>
 NTSTATUS NativeWow64::GetThreadContextT( HANDLE hThread, _CONTEXT64& ctx )
 {
-    static ptr_t gtc = _local.GetProcAddress64( _local.getNTDLL64(), "NtGetContextThread" );
+    static ptr_t gtc = GetProcAddress64( getNTDLL64(), "NtGetContextThread" );
     if (gtc == 0)
         return STATUS_ORDINAL_NOT_FOUND;
 
-    return static_cast<NTSTATUS>(_local.X64Call( gtc, hThread, &ctx ));
+    return static_cast<NTSTATUS>(X64Call( gtc, 2, (DWORD64)hThread, (DWORD64)&ctx ));
 }
 
 /// <summary>
@@ -260,9 +267,8 @@ NTSTATUS NativeWow64::SetThreadContextT( HANDLE hThread, _CONTEXT32& ctx )
     }
     else
     {
-        LastNtStatus( STATUS_SUCCESS );
-        SetThreadContext( hThread, reinterpret_cast<const CONTEXT*>(&ctx) );
-        return LastNtStatus();
+        auto r = SetThreadContext(hThread, reinterpret_cast<const CONTEXT*>(&ctx));
+        return r != 0 ? STATUS_SUCCESS : LastNtStatus();
     }
 }
 
@@ -274,11 +280,30 @@ NTSTATUS NativeWow64::SetThreadContextT( HANDLE hThread, _CONTEXT32& ctx )
 /// <returns>Status code</returns>
 NTSTATUS NativeWow64::SetThreadContextT( HANDLE hThread, _CONTEXT64& ctx )
 {
-    static ptr_t stc = _local.GetProcAddress64( _local.getNTDLL64( ), "NtSetContextThread" );
+    static ptr_t stc = GetProcAddress64( getNTDLL64(), "NtSetContextThread" );
     if (stc == 0)
         return STATUS_ORDINAL_NOT_FOUND;
 
-    return static_cast<NTSTATUS>(_local.X64Call( stc, hThread, &ctx ));
+    return static_cast<NTSTATUS>(X64Call( stc, 2, (DWORD64)hThread, (DWORD64)&ctx ));
+}
+
+/// <summary>
+/// NtQueueApcThread
+/// </summary>
+/// <param name="hThread">Thread handle.</param>
+/// <param name="func">APC function</param>
+/// <param name="arg">APC argument</param>
+/// <returns>Status code</returns>
+NTSTATUS NativeWow64::QueueApcT( HANDLE hThread, ptr_t func, ptr_t arg )
+{
+    if (_wowBarrier.targetWow64)
+        return Native::QueueApcT( hThread, func, arg );
+
+    static ptr_t qat = GetProcAddress64( getNTDLL64(), "NtQueueApcThread" );
+    if (qat == 0)
+        return STATUS_ORDINAL_NOT_FOUND;
+
+    return static_cast<NTSTATUS>(X64Call( qat, 5, (DWORD64)hThread, func, arg, 0ull, 0ull ));
 }
 
 /// <summary>
@@ -340,7 +365,7 @@ ptr_t NativeWow64::getTEB( HANDLE hThread, _TEB32* pteb )
         ULONG bytes = 0;
         
         if (NT_SUCCESS( SAFE_NATIVE_CALL( NtQueryInformationThread, hThread, (THREADINFOCLASS)0, &tbi, (ULONG)sizeof( tbi ), &bytes ) ) && pteb)
-             ReadProcessMemory( _hProcess, reinterpret_cast<LPCVOID>(tbi.TebBaseAddress), pteb, sizeof(_TEB32), nullptr );
+            ReadProcessMemory( _hProcess, (LPCVOID)((uintptr_t)tbi.TebBaseAddress), pteb, sizeof( _TEB32 ), nullptr );
 
         return static_cast<ptr_t>(tbi.TebBaseAddress);
     }
@@ -356,15 +381,15 @@ ptr_t NativeWow64::getTEB( HANDLE hThread, _TEB64* pteb )
     _THREAD_BASIC_INFORMATION_T<DWORD64> info = { 0 };
     ULONG bytes = 0;
 
-    static ptr_t ntQit = _local.GetProcAddress64( _local.getNTDLL64(), "NtQueryInformationThread" );
+    static ptr_t ntQit = GetProcAddress64( getNTDLL64(), "NtQueryInformationThread" );
 
     if (ntQit == 0)
     {
-        LastNtStatus( STATUS_ORDINAL_NOT_FOUND );
+        SetLastNtStatus( STATUS_ORDINAL_NOT_FOUND );
         return 0;
     }
 
-    _local.X64Call( ntQit, hThread, 0, &info, sizeof(info), &bytes );
+    X64Call( ntQit, 5, (DWORD64)hThread, 0ull, (DWORD64)&info, (DWORD64)sizeof(info), (DWORD64)&bytes );
 
     if (bytes > 0 && NT_SUCCESS( SAFE_NATIVE_CALL( NtWow64ReadVirtualMemory64, _hProcess, info.TebBaseAddress, pteb, sizeof( _TEB64 ), nullptr ) ))
         return static_cast<ptr_t>(info.TebBaseAddress);

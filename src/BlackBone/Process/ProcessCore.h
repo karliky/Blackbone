@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../Include/NativeStructures.h"
+#include "../Include/HandleGuard.h"
 #include "../Subsystem/Wow64Subsystem.h"
 #include "../Subsystem/x86Subsystem.h"
 
@@ -12,10 +13,6 @@ namespace blackbone
 
 class ProcessCore
 {
-    friend class Process;
-
-    typedef std::unique_ptr<Native> ptrNative;
-
 public:
 
     /// <summary>
@@ -51,29 +48,34 @@ public:
     /// <summary>
     /// Get WOW64 PEB
     /// </summary>
-    /// <param name="ppeb">Retrieved PEB</param>
+    /// <param name="ppeb">Retrieved PEB32</param>
     /// <returns>PEB pointer</returns>
-    BLACKBONE_API inline ptr_t peb( _PEB32* ppeb ) { return _native->getPEB( ppeb ); }
+    BLACKBONE_API inline ptr_t peb32( _PEB32* ppeb = nullptr ) { return _native->getPEB( ppeb ); }
 
     /// <summary>
     /// Get native PEB
     /// </summary>
-    /// <param name="ppeb">Retrieved PEB</param>
+    /// <param name="ppeb">Retrieved PEB64</param>
     /// <returns>PEB pointer</returns>
-    BLACKBONE_API inline ptr_t peb( _PEB64* ppeb ) { return _native->getPEB( ppeb ); }
+    BLACKBONE_API inline ptr_t peb64( _PEB64* ppeb = nullptr ) { return _native->getPEB( ppeb ); }
 
     /// <summary>
     /// Get PEB
     /// </summary>
     /// <param name="ppeb">Retrieved PEB</param>
     /// <returns>PEB pointer</returns>
-    BLACKBONE_API inline ptr_t peb() { return peb( (PEB_T*)nullptr ); }
+    template<typename T = uintptr_t>
+    BLACKBONE_API inline ptr_t peb( _PEB_T<T>* ppeb = nullptr ) { return _native->getPEB( ppeb ); }
 
     /// <summary>
     /// Check if process is a protected process
     /// </summary>
     /// <returns>true if protected</returns>
     BLACKBONE_API bool isProtected();
+
+private:
+    friend class Process;
+    using ptrNative = std::unique_ptr<Native>;
 
 private:
      ProcessCore();
@@ -107,10 +109,10 @@ private:
     void Close();
 
 private:
-    HANDLE    _hProcess = NULL; // Process handle
-    DWORD     _pid = 0;         // Process ID
-    ptrNative _native;          // Api wrapper
-    bool      _dep = true;      // DEP state for process
+    ProcessHandle _hProcess;        // Process handle
+    DWORD         _pid = 0;         // Process ID
+    ptrNative     _native;          // Api wrapper
+    bool          _dep = true;      // DEP state for process
 };
 
 }

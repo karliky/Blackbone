@@ -16,6 +16,14 @@
 
 #define MAKEINTRESOURCEW(i) ((PWCH)((ULONG_PTR)((USHORT)(i))))
 
+typedef struct _SYSTEM_SERVICE_DESCRIPTOR_TABLE 
+{
+    PULONG_PTR ServiceTableBase;
+    PULONG ServiceCounterTableBase;
+    ULONG_PTR NumberOfServices;
+    PUCHAR ParamTableBase;
+} SYSTEM_SERVICE_DESCRIPTOR_TABLE, *PSYSTEM_SERVICE_DESCRIPTOR_TABLE;
+
 typedef union _PS_PROTECTION
 {
     UCHAR Level;
@@ -44,6 +52,74 @@ typedef union _KEXECUTE_OPTIONS
     UCHAR ExecuteOptions;
 } KEXECUTE_OPTIONS, *PKEXECUTE_OPTIONS;
 
+typedef struct _EPROCESS_FLAGS2
+{
+    unsigned int JobNotReallyActive : 1;
+    unsigned int AccountingFolded : 1;
+    unsigned int NewProcessReported : 1;
+    unsigned int ExitProcessReported : 1;
+    unsigned int ReportCommitChanges : 1;
+    unsigned int LastReportMemory : 1;
+    unsigned int ForceWakeCharge : 1;
+    unsigned int CrossSessionCreate : 1;
+    unsigned int NeedsHandleRundown : 1;
+    unsigned int RefTraceEnabled : 1;
+    unsigned int DisableDynamicCode : 1;
+    unsigned int EmptyJobEvaluated : 1;
+    unsigned int DefaultPagePriority : 3;
+    unsigned int PrimaryTokenFrozen : 1;
+    unsigned int ProcessVerifierTarget : 1;
+    unsigned int StackRandomizationDisabled : 1;
+    unsigned int AffinityPermanent : 1;
+    unsigned int AffinityUpdateEnable : 1;
+    unsigned int PropagateNode : 1;
+    unsigned int ExplicitAffinity : 1;
+    unsigned int ProcessExecutionState : 2;
+    unsigned int DisallowStrippedImages : 1;
+    unsigned int HighEntropyASLREnabled : 1;
+    unsigned int ExtensionPointDisable : 1;
+    unsigned int ForceRelocateImages : 1;
+    unsigned int ProcessStateChangeRequest : 2;
+    unsigned int ProcessStateChangeInProgress : 1;
+    unsigned int DisallowWin32kSystemCalls : 1;
+} EPROCESS_FLAGS2, *PEPROCESS_FLAGS2;
+
+typedef struct _MITIGATION_FLAGS
+{
+    unsigned int ControlFlowGuardEnabled : 1;
+    unsigned int ControlFlowGuardExportSuppressionEnabled : 1;
+    unsigned int ControlFlowGuardStrict : 1;
+    unsigned int DisallowStrippedImages : 1;
+    unsigned int ForceRelocateImages : 1;
+    unsigned int HighEntropyASLREnabled : 1;
+    unsigned int StackRandomizationDisabled : 1;
+    unsigned int ExtensionPointDisable : 1;
+    unsigned int DisableDynamicCode : 1;
+    unsigned int DisableDynamicCodeAllowOptOut : 1;
+    unsigned int DisableDynamicCodeAllowRemoteDowngrade : 1;
+    unsigned int AuditDisableDynamicCode : 1;
+    unsigned int DisallowWin32kSystemCalls : 1;
+    unsigned int AuditDisallowWin32kSystemCalls : 1;
+    unsigned int EnableFilteredWin32kAPIs : 1;
+    unsigned int AuditFilteredWin32kAPIs : 1;
+    unsigned int DisableNonSystemFonts : 1;
+    unsigned int AuditNonSystemFontLoading : 1;
+    unsigned int PreferSystem32Images : 1;
+    unsigned int ProhibitRemoteImageMap : 1;
+    unsigned int AuditProhibitRemoteImageMap : 1;
+    unsigned int ProhibitLowILImageMap : 1;
+    unsigned int AuditProhibitLowILImageMap : 1;
+    unsigned int SignatureMitigationOptIn : 1;
+    unsigned int AuditBlockNonMicrosoftBinaries : 1;
+    unsigned int AuditBlockNonMicrosoftBinariesAllowStore : 1;
+    unsigned int LoaderIntegrityContinuityEnabled : 1;
+    unsigned int AuditLoaderIntegrityContinuity : 1;
+    unsigned int EnableModuleTamperingProtection : 1;
+    unsigned int EnableModuleTamperingProtectionNoInherit : 1;
+    unsigned int RestrictIndirectBranchPrediction;
+    unsigned int IsolateSecurityDomain;
+} MITIGATION_FLAGS, *PMITIGATION_FLAGS;
+
 typedef union _EXHANDLE
 {
     struct
@@ -57,6 +133,32 @@ typedef union _EXHANDLE
 
 #pragma warning(disable : 4214 4201)
 
+#pragma pack(push, 1)
+typedef struct _POOL_HEADER // Size=16
+{
+    union
+    {
+        struct
+        {
+            unsigned long PreviousSize : 8; // Size=4 Offset=0 BitOffset=0 BitCount=8
+            unsigned long PoolIndex : 8; // Size=4 Offset=0 BitOffset=8 BitCount=8
+            unsigned long BlockSize : 8; // Size=4 Offset=0 BitOffset=16 BitCount=8
+            unsigned long PoolType : 8; // Size=4 Offset=0 BitOffset=24 BitCount=8
+        };
+        unsigned long Ulong1; // Size=4 Offset=0
+    };
+    unsigned long PoolTag; // Size=4 Offset=4
+    union
+    {
+        struct _EPROCESS * ProcessBilled; // Size=8 Offset=8
+        struct
+        {
+            unsigned short AllocatorBackTraceIndex; // Size=2 Offset=8
+            unsigned short PoolTagHash; // Size=2 Offset=10
+        };
+    };
+} POOL_HEADER, *PPOOL_HEADER;
+#pragma pack(pop)
 
 typedef struct _HANDLE_TABLE_ENTRY // Size=16
 {
@@ -135,7 +237,37 @@ typedef struct _OBJECT_HEADER // Size=56
     struct _QUAD Body; // Size=8 Offset=48
 } OBJECT_HEADER, *POBJECT_HEADER;
 
-typedef struct _MEMORY_BASIC_INFORMATION
+typedef union _EX_FAST_REF // Size=8
+{
+    void * Object;
+    struct
+    {
+        unsigned __int64 RefCnt : 4; 
+    };
+    unsigned __int64 Value;
+} EX_FAST_REF, *PEX_FAST_REF;
+
+typedef struct _CONTROL_AREA // Size=120
+{
+    struct _SEGMENT * Segment;
+    struct _LIST_ENTRY ListHead;
+    unsigned __int64 NumberOfSectionReferences;
+    unsigned __int64 NumberOfPfnReferences; 
+    unsigned __int64 NumberOfMappedViews;
+    unsigned __int64 NumberOfUserReferences;
+    unsigned long f1; 
+    unsigned long f2;
+    EX_FAST_REF FilePointer;
+    // Other fields
+} CONTROL_AREA, *PCONTROL_AREA;
+
+typedef struct _SUBSECTION // Size=56
+{
+    PCONTROL_AREA ControlArea;
+    // Other fields
+} SUBSECTION, *PSUBSECTION;
+
+typedef struct _MEMORY_BASIC_INFORMATION_EX
 {
     PVOID BaseAddress;
     PVOID AllocationBase;
@@ -144,7 +276,7 @@ typedef struct _MEMORY_BASIC_INFORMATION
     ULONG State;
     ULONG Protect;
     ULONG Type;
-} MEMORY_BASIC_INFORMATION, *PMEMORY_BASIC_INFORMATION;
+} MEMORY_BASIC_INFORMATION_EX, *PMEMORY_BASIC_INFORMATION_EX;
 
 typedef struct _SYSTEM_CALL_COUNT_INFORMATION
 {
@@ -276,7 +408,7 @@ typedef struct _RTL_PROCESS_MODULE_INFORMATION
     USHORT InitOrderIndex;
     USHORT LoadCount;
     USHORT OffsetToFileName;
-    UCHAR  FullPathName[256];
+    UCHAR  FullPathName[MAXIMUM_FILENAME_LENGTH];
 } RTL_PROCESS_MODULE_INFORMATION, *PRTL_PROCESS_MODULE_INFORMATION;
 
 typedef struct _RTL_PROCESS_MODULES
@@ -360,7 +492,7 @@ typedef struct _PEB
     PVOID AtlThunkSListPtr;
     PVOID IFEOKey;
     PVOID CrossProcessFlags;
-    PVOID UserSharedInfoPtr;
+    PVOID KernelCallbackTable;
     ULONG SystemReserved;
     ULONG AtlThunkSListPtr32;
     PVOID ApiSetMap;
@@ -432,7 +564,6 @@ typedef union _WOW64_APC_CONTEXT
 
 } WOW64_APC_CONTEXT, *PWOW64_APC_CONTEXT;
 
-
 typedef struct _NON_PAGED_DEBUG_INFO
 {
     USHORT      Signature;
@@ -470,37 +601,365 @@ typedef struct _KLDR_DATA_TABLE_ENTRY
 } KLDR_DATA_TABLE_ENTRY, *PKLDR_DATA_TABLE_ENTRY;
 
 
-#define ACTCTX_FLAG_PROCESSOR_ARCHITECTURE_VALID    (0x00000001)
-#define ACTCTX_FLAG_LANGID_VALID                    (0x00000002)
-#define ACTCTX_FLAG_ASSEMBLY_DIRECTORY_VALID        (0x00000004)
-#define ACTCTX_FLAG_RESOURCE_NAME_VALID             (0x00000008)
-#define ACTCTX_FLAG_SET_PROCESS_DEFAULT             (0x00000010)
-#define ACTCTX_FLAG_APPLICATION_NAME_VALID          (0x00000020)
-#define ACTCTX_FLAG_SOURCE_IS_ASSEMBLYREF           (0x00000040)
-#define ACTCTX_FLAG_HMODULE_VALID                   (0x00000080)
+//
+// This structure is used by the debugger for all targets
+// It is the same size as DBGKD_DATA_HEADER on all systems
+//
+typedef struct _DBGKD_DEBUG_DATA_HEADER64 {
 
-typedef struct tagACTCTXW 
-{
-    ULONG  cbSize;
-    ULONG  dwFlags;
-    PWCH   lpSource;
-    USHORT wProcessorArchitecture;
-    USHORT wLangId;
-    PWCH   lpAssemblyDirectory;
-    PWCH   lpResourceName;
-    PWCH   lpApplicationName;
-    PVOID  hModule;
-} ACTCTXW, *PACTCTXW;
+    //
+    // Link to other blocks
+    //
 
-typedef struct tagACTCTXW32
+    LIST_ENTRY64 List;
+
+    //
+    // This is a unique tag to identify the owner of the block.
+    // If your component only uses one pool tag, use it for this, too.
+    //
+
+    ULONG           OwnerTag;
+
+    //
+    // This must be initialized to the size of the data block,
+    // including this structure.
+    //
+
+    ULONG           Size;
+
+} DBGKD_DEBUG_DATA_HEADER64, *PDBGKD_DEBUG_DATA_HEADER64;
+
+
+//
+// This structure is the same size on all systems.  The only field
+// which must be translated by the debugger is Header.List.
+//
+
+//
+// DO NOT ADD OR REMOVE FIELDS FROM THE MIDDLE OF THIS STRUCTURE!!!
+//
+// If you remove a field, replace it with an "unused" placeholder.
+// Do not reuse fields until there has been enough time for old debuggers
+// and extensions to age out.
+//
+typedef struct _KDDEBUGGER_DATA64 {
+
+    DBGKD_DEBUG_DATA_HEADER64 Header;
+
+    //
+    // Base address of kernel image
+    //
+
+    ULONG64   KernBase;
+
+    //
+    // DbgBreakPointWithStatus is a function which takes an argument
+    // and hits a breakpoint.  This field contains the address of the
+    // breakpoint instruction.  When the debugger sees a breakpoint
+    // at this address, it may retrieve the argument from the first
+    // argument register, or on x86 the eax register.
+    //
+
+    ULONG64   BreakpointWithStatus;       // address of breakpoint
+
+    //
+    // Address of the saved context record during a bugcheck
+    //
+    // N.B. This is an automatic in KeBugcheckEx's frame, and
+    // is only valid after a bugcheck.
+    //
+
+    ULONG64   SavedContext;
+
+    //
+    // help for walking stacks with user callbacks:
+    //
+
+    //
+    // The address of the thread structure is provided in the
+    // WAIT_STATE_CHANGE packet.  This is the offset from the base of
+    // the thread structure to the pointer to the kernel stack frame
+    // for the currently active usermode callback.
+    //
+
+    USHORT  ThCallbackStack;            // offset in thread data
+
+    //
+    // these values are offsets into that frame:
+    //
+
+    USHORT  NextCallback;               // saved pointer to next callback frame
+    USHORT  FramePointer;               // saved frame pointer
+
+    //
+    // pad to a quad boundary
+    //
+    USHORT  PaeEnabled;
+
+    //
+    // Address of the kernel callout routine.
+    //
+
+    ULONG64   KiCallUserMode;             // kernel routine
+
+    //
+    // Address of the usermode entry point for callbacks.
+    //
+
+    ULONG64   KeUserCallbackDispatcher;   // address in ntdll
+
+
+    //
+    // Addresses of various kernel data structures and lists
+    // that are of interest to the kernel debugger.
+    //
+
+    ULONG64   PsLoadedModuleList;
+    ULONG64   PsActiveProcessHead;
+    ULONG64   PspCidTable;
+
+    ULONG64   ExpSystemResourcesList;
+    ULONG64   ExpPagedPoolDescriptor;
+    ULONG64   ExpNumberOfPagedPools;
+
+    ULONG64   KeTimeIncrement;
+    ULONG64   KeBugCheckCallbackListHead;
+    ULONG64   KiBugcheckData;
+
+    ULONG64   IopErrorLogListHead;
+
+    ULONG64   ObpRootDirectoryObject;
+    ULONG64   ObpTypeObjectType;
+
+    ULONG64   MmSystemCacheStart;
+    ULONG64   MmSystemCacheEnd;
+    ULONG64   MmSystemCacheWs;
+
+    ULONG64   MmPfnDatabase;
+    ULONG64   MmSystemPtesStart;
+    ULONG64   MmSystemPtesEnd;
+    ULONG64   MmSubsectionBase;
+    ULONG64   MmNumberOfPagingFiles;
+
+    ULONG64   MmLowestPhysicalPage;
+    ULONG64   MmHighestPhysicalPage;
+    ULONG64   MmNumberOfPhysicalPages;
+
+    ULONG64   MmMaximumNonPagedPoolInBytes;
+    ULONG64   MmNonPagedSystemStart;
+    ULONG64   MmNonPagedPoolStart;
+    ULONG64   MmNonPagedPoolEnd;
+
+    ULONG64   MmPagedPoolStart;
+    ULONG64   MmPagedPoolEnd;
+    ULONG64   MmPagedPoolInformation;
+    ULONG64   MmPageSize;
+
+    ULONG64   MmSizeOfPagedPoolInBytes;
+
+    ULONG64   MmTotalCommitLimit;
+    ULONG64   MmTotalCommittedPages;
+    ULONG64   MmSharedCommit;
+    ULONG64   MmDriverCommit;
+    ULONG64   MmProcessCommit;
+    ULONG64   MmPagedPoolCommit;
+    ULONG64   MmExtendedCommit;
+
+    ULONG64   MmZeroedPageListHead;
+    ULONG64   MmFreePageListHead;
+    ULONG64   MmStandbyPageListHead;
+    ULONG64   MmModifiedPageListHead;
+    ULONG64   MmModifiedNoWritePageListHead;
+    ULONG64   MmAvailablePages;
+    ULONG64   MmResidentAvailablePages;
+
+    ULONG64   PoolTrackTable;
+    ULONG64   NonPagedPoolDescriptor;
+
+    ULONG64   MmHighestUserAddress;
+    ULONG64   MmSystemRangeStart;
+    ULONG64   MmUserProbeAddress;
+
+    ULONG64   KdPrintCircularBuffer;
+    ULONG64   KdPrintCircularBufferEnd;
+    ULONG64   KdPrintWritePointer;
+    ULONG64   KdPrintRolloverCount;
+
+    ULONG64   MmLoadedUserImageList;
+
+    // NT 5.1 Addition
+
+    ULONG64   NtBuildLab;
+    ULONG64   KiNormalSystemCall;
+
+    // NT 5.0 hotfix addition
+
+    ULONG64   KiProcessorBlock;
+    ULONG64   MmUnloadedDrivers;
+    ULONG64   MmLastUnloadedDriver;
+    ULONG64   MmTriageActionTaken;
+    ULONG64   MmSpecialPoolTag;
+    ULONG64   KernelVerifier;
+    ULONG64   MmVerifierData;
+    ULONG64   MmAllocatedNonPagedPool;
+    ULONG64   MmPeakCommitment;
+    ULONG64   MmTotalCommitLimitMaximum;
+    ULONG64   CmNtCSDVersion;
+
+    // NT 5.1 Addition
+
+    ULONG64   MmPhysicalMemoryBlock;
+    ULONG64   MmSessionBase;
+    ULONG64   MmSessionSize;
+    ULONG64   MmSystemParentTablePage;
+
+    // Server 2003 addition
+
+    ULONG64   MmVirtualTranslationBase;
+
+    USHORT    OffsetKThreadNextProcessor;
+    USHORT    OffsetKThreadTeb;
+    USHORT    OffsetKThreadKernelStack;
+    USHORT    OffsetKThreadInitialStack;
+
+    USHORT    OffsetKThreadApcProcess;
+    USHORT    OffsetKThreadState;
+    USHORT    OffsetKThreadBStore;
+    USHORT    OffsetKThreadBStoreLimit;
+
+    USHORT    SizeEProcess;
+    USHORT    OffsetEprocessPeb;
+    USHORT    OffsetEprocessParentCID;
+    USHORT    OffsetEprocessDirectoryTableBase;
+
+    USHORT    SizePrcb;
+    USHORT    OffsetPrcbDpcRoutine;
+    USHORT    OffsetPrcbCurrentThread;
+    USHORT    OffsetPrcbMhz;
+
+    USHORT    OffsetPrcbCpuType;
+    USHORT    OffsetPrcbVendorString;
+    USHORT    OffsetPrcbProcStateContext;
+    USHORT    OffsetPrcbNumber;
+
+    USHORT    SizeEThread;
+
+    ULONG64   KdPrintCircularBufferPtr;
+    ULONG64   KdPrintBufferSize;
+
+    ULONG64   KeLoaderBlock;
+
+    USHORT    SizePcr;
+    USHORT    OffsetPcrSelfPcr;
+    USHORT    OffsetPcrCurrentPrcb;
+    USHORT    OffsetPcrContainedPrcb;
+
+    USHORT    OffsetPcrInitialBStore;
+    USHORT    OffsetPcrBStoreLimit;
+    USHORT    OffsetPcrInitialStack;
+    USHORT    OffsetPcrStackLimit;
+
+    USHORT    OffsetPrcbPcrPage;
+    USHORT    OffsetPrcbProcStateSpecialReg;
+    USHORT    GdtR0Code;
+    USHORT    GdtR0Data;
+
+    USHORT    GdtR0Pcr;
+    USHORT    GdtR3Code;
+    USHORT    GdtR3Data;
+    USHORT    GdtR3Teb;
+
+    USHORT    GdtLdt;
+    USHORT    GdtTss;
+    USHORT    Gdt64R3CmCode;
+    USHORT    Gdt64R3CmTeb;
+
+    ULONG64   IopNumTriageDumpDataBlocks;
+    ULONG64   IopTriageDumpDataBlocks;
+
+    // Longhorn addition
+
+    ULONG64   VfCrashDataBlock;
+    ULONG64   MmBadPagesDetected;
+    ULONG64   MmZeroedPageSingleBitErrorsDetected;
+
+    // Windows 7 addition
+
+    ULONG64   EtwpDebuggerData;
+    USHORT    OffsetPrcbContext;
+
+    // Windows 8 addition
+
+    USHORT    OffsetPrcbMaxBreakpoints;
+    USHORT    OffsetPrcbMaxWatchpoints;
+
+    ULONG     OffsetKThreadStackLimit;
+    ULONG     OffsetKThreadStackBase;
+    ULONG     OffsetKThreadQueueListEntry;
+    ULONG     OffsetEThreadIrpList;
+
+    USHORT    OffsetPrcbIdleThread;
+    USHORT    OffsetPrcbNormalDpcState;
+    USHORT    OffsetPrcbDpcStack;
+    USHORT    OffsetPrcbIsrStack;
+
+    USHORT    SizeKDPC_STACK_FRAME;
+
+    // Windows 8.1 Addition
+
+    USHORT    OffsetKPriQueueThreadListHead;
+    USHORT    OffsetKThreadWaitReason;
+
+    // Windows 10 RS1 Addition
+
+    USHORT    Padding;
+    ULONG64   PteBase;
+
+    // Windows 10 RS5 Addition
+
+    ULONG64 RetpolineStubFunctionTable;
+    ULONG RetpolineStubFunctionTableSize;
+    ULONG RetpolineStubOffset;
+    ULONG RetpolineStubSize;
+
+} KDDEBUGGER_DATA64, *PKDDEBUGGER_DATA64;
+
+
+typedef struct _DUMP_HEADER
 {
-    ULONG  cbSize;
-    ULONG  dwFlags;
-    ULONG  lpSource;
-    USHORT wProcessorArchitecture;
-    USHORT wLangId;
-    ULONG  lpAssemblyDirectory;
-    ULONG  lpResourceName;
-    ULONG  lpApplicationName;
-    ULONG  hModule;
-} ACTCTXW32, *PACTCTXW32;
+    ULONG Signature;
+    ULONG ValidDump;
+    ULONG MajorVersion;
+    ULONG MinorVersion;
+    ULONG_PTR DirectoryTableBase;
+    ULONG_PTR PfnDataBase;
+    PLIST_ENTRY PsLoadedModuleList;
+    PLIST_ENTRY PsActiveProcessHead;
+    ULONG MachineImageType;
+    ULONG NumberProcessors;
+    ULONG BugCheckCode;
+    ULONG_PTR BugCheckParameter1;
+    ULONG_PTR BugCheckParameter2;
+    ULONG_PTR BugCheckParameter3;
+    ULONG_PTR BugCheckParameter4;
+    CHAR VersionUser[32];
+    struct _KDDEBUGGER_DATA64 *KdDebuggerDataBlock;
+} DUMP_HEADER, *PDUMP_HEADER;
+C_ASSERT( FIELD_OFFSET( DUMP_HEADER, Signature ) == 0 );
+C_ASSERT( FIELD_OFFSET( DUMP_HEADER, ValidDump ) == 4 );
+C_ASSERT( FIELD_OFFSET( DUMP_HEADER, MajorVersion ) == 8 );
+C_ASSERT( FIELD_OFFSET( DUMP_HEADER, MinorVersion ) == 0xc );
+C_ASSERT( FIELD_OFFSET( DUMP_HEADER, DirectoryTableBase ) == 0x10 );
+C_ASSERT( FIELD_OFFSET( DUMP_HEADER, PfnDataBase ) == 0x18 );
+C_ASSERT( FIELD_OFFSET( DUMP_HEADER, PsLoadedModuleList ) == 0x20 );
+C_ASSERT( FIELD_OFFSET( DUMP_HEADER, PsActiveProcessHead ) == 0x28 );
+C_ASSERT( FIELD_OFFSET( DUMP_HEADER, MachineImageType ) == 0x30 );
+C_ASSERT( FIELD_OFFSET( DUMP_HEADER, NumberProcessors ) == 0x34 );
+C_ASSERT( FIELD_OFFSET( DUMP_HEADER, BugCheckCode ) == 0x38 );
+C_ASSERT( FIELD_OFFSET( DUMP_HEADER, BugCheckParameter1 ) == 0x40 );
+C_ASSERT( FIELD_OFFSET( DUMP_HEADER, BugCheckParameter2 ) == 0x48 );
+C_ASSERT( FIELD_OFFSET( DUMP_HEADER, BugCheckParameter3 ) == 0x50 );
+C_ASSERT( FIELD_OFFSET( DUMP_HEADER, BugCheckParameter4 ) == 0x58 );
+C_ASSERT( FIELD_OFFSET( DUMP_HEADER, KdDebuggerDataBlock ) == 0x80 );
+
+extern KDDEBUGGER_DATA64 g_KdBlock;

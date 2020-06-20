@@ -1,23 +1,24 @@
 {
-  "name": "blackbone-node",
-  "version": "1.0.1",
-  "description": "JavaScript bindings for BlackBone memory hacking library",
+  "name": "blackbone",
+  "version": "1.0.0",
+  "description": "- **x86 and x64 support**",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "install": "cmake-js compile"
   },
-  "author": "@k4rliky",
-  "license": "MIT",
-  "scripts": {
-    "install": "cmake-js rebuild"
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/DarthTon/Blackbone.git"
   },
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/DarthTon/Blackbone/issues"
+  },
+  "homepage": "https://github.com/DarthTon/Blackbone#readme",
   "dependencies": {
-    "cmake-js": "^1.0.2",
-    "nan": "^2.0.4"
-  },
-  "repository" :
-  {
-    "type" : "git",
-    "url" : "https://github.com/karliky/Blackbone.git"
+    "cmake-js": "^6.1.0",
+    "nan": "^2.14.1"
   }
 }

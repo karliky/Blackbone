@@ -22,6 +22,7 @@ PEImage::PEImage( void )
 
 PEImage::~PEImage( void )
 {
+    Release();
 }
 
 /// <summary>
@@ -32,23 +33,24 @@ PEImage::~PEImage( void )
 /// <returns>Status code</returns>
 NTSTATUS PEImage::Load( const std::wstring& path, bool skipActx /*= false*/ )
 {
-    Release();
+    Release( true );
     _imagePath = path;
     _noFile = false;
 
-    _hFile = CreateFileW( path.c_str(), FILE_GENERIC_READ,
-                          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                          NULL, OPEN_EXISTING, 0, NULL );
+    _hFile = CreateFileW(
+        path.c_str(), FILE_GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        NULL, OPEN_EXISTING, 0, NULL
+        );
 
-    if (_hFile != INVALID_HANDLE_VALUE)
+    if (_hFile)
     {
         // Try mapping as image
         _hMapping = CreateFileMappingW( _hFile, NULL, SEC_IMAGE | PAGE_READONLY, 0, 0, NULL );
-
-        if (_hMapping && _hMapping != INVALID_HANDLE_VALUE)
+        if (_hMapping)
         {
             _isPlainData = false;
-            _pFileBase = MapViewOfFile( _hMapping, FILE_MAP_READ, 0, 0, 0 );
+            _pFileBase = Mapping( MapViewOfFile( _hMapping, FILE_MAP_READ, 0, 0, 0 ) );
         }
         // Map as simple datafile
         else
@@ -56,8 +58,8 @@ NTSTATUS PEImage::Load( const std::wstring& path, bool skipActx /*= false*/ )
             _isPlainData = true;
             _hMapping = CreateFileMappingW( _hFile, NULL, PAGE_READONLY, 0, 0, NULL );
 
-            if (_hMapping && _hMapping != INVALID_HANDLE_VALUE)
-                _pFileBase = MapViewOfFile( _hMapping, FILE_MAP_READ, 0, 0, 0 );
+            if (_hMapping)
+                _pFileBase = Mapping( MapViewOfFile( _hMapping, FILE_MAP_READ, 0, 0, 0 ) );
         }
 
         // Mapping failed
@@ -83,7 +85,7 @@ NTSTATUS PEImage::Load( const std::wstring& path, bool skipActx /*= false*/ )
 /// <returns>Status code</returns>
 NTSTATUS PEImage::Load( void* pData, size_t size, bool plainData /*= true */ )
 {
-    Release();
+    Release( true );
 
     _noFile = true;
     _pFileBase = pData;
@@ -97,45 +99,39 @@ NTSTATUS PEImage::Load( void* pData, size_t size, bool plainData /*= true */ )
 }
 
 /// <summary>
+/// Reload closed image
+/// </summary>
+/// <returns>Status code</returns>
+NTSTATUS PEImage::Reload()
+{
+    return Load( _imagePath );
+}
+
+/// <summary>
 /// Release mapping, if any
 /// </summary>
-void PEImage::Release()
+/// <param name="temporary">Preserve file paths for file reopening</param>
+void PEImage::Release( bool temporary /*= false*/ )
 {
-    if (_hctx != INVALID_HANDLE_VALUE)
-    {
-        ReleaseActCtx( _hctx );
-        _hctx = INVALID_HANDLE_VALUE;
-    }
-
-    if (_hMapping && _hMapping != INVALID_HANDLE_VALUE)
-    {
-        if (_pFileBase)
-        {
-            UnmapViewOfFile( _pFileBase );
-            _pFileBase = nullptr;
-        }
-
-        CloseHandle( _hMapping );
-        _hMapping = NULL;
-    }
-
-    if (_hFile != INVALID_HANDLE_VALUE)
-    {
-        CloseHandle( _hFile );
-        _hFile = INVALID_HANDLE_VALUE;
-    }
+    _pFileBase.reset();
+    _hMapping.reset();
+    _hFile.reset();
+    _hctx.reset();
 
     // Reset pointers to data
     _pImageHdr32 = nullptr;
     _pImageHdr64 = nullptr;
 
-    _imagePath.clear();
+    if(!temporary)
+    {
+        _imagePath.clear();
 
-    // Ensure temporary file is deleted
-    if (_noFile)
-        DeleteFileW( _manifestPath.c_str() );
+        // Ensure temporary file is deleted
+        if (_noFile)
+            DeleteFileW( _manifestPath.c_str() );
 
-    _manifestPath.clear();
+        _manifestPath.clear();
+    }
 }
 
 /// <summary>
@@ -155,7 +151,7 @@ NTSTATUS PEImage::Parse( void* pImageBase /*= nullptr*/ )
         return STATUS_INVALID_ADDRESS;
 
     // Get DOS header
-    pDosHdr = reinterpret_cast<const IMAGE_DOS_HEADER*>(_pFileBase);
+    pDosHdr = reinterpret_cast<const IMAGE_DOS_HEADER*>(_pFileBase.get());
 
     // File not a valid PE file
     if (pDosHdr->e_magic != IMAGE_DOS_SIGNATURE)
@@ -169,30 +165,28 @@ NTSTATUS PEImage::Parse( void* pImageBase /*= nullptr*/ )
     if (_pImageHdr32->Signature != IMAGE_NT_SIGNATURE)
         return STATUS_INVALID_IMAGE_FORMAT;
 
+    auto GetHeaderData = [this, &pSection]( auto pImageHeader )
+    {
+        _imgBase = pImageHeader->OptionalHeader.ImageBase;
+        _imgSize = pImageHeader->OptionalHeader.SizeOfImage;
+        _hdrSize = pImageHeader->OptionalHeader.SizeOfHeaders;
+        _epRVA = pImageHeader->OptionalHeader.AddressOfEntryPoint;
+        _subsystem = pImageHeader->OptionalHeader.Subsystem;
+        _DllCharacteristics = pImageHeader->OptionalHeader.DllCharacteristics;
+
+        pSection = reinterpret_cast<const IMAGE_SECTION_HEADER*>(pImageHeader + 1);
+    };
+
     // Detect x64 image
     if (_pImageHdr32->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC)
     {
         _is64 = true;
-
-        _imgBase = _pImageHdr64->OptionalHeader.ImageBase;
-        _imgSize = _pImageHdr64->OptionalHeader.SizeOfImage;
-        _hdrSize = _pImageHdr64->OptionalHeader.SizeOfHeaders;
-        _epRVA   = _pImageHdr64->OptionalHeader.AddressOfEntryPoint;
-        _subsystem = _pImageHdr64->OptionalHeader.Subsystem;
-
-        pSection = reinterpret_cast<const IMAGE_SECTION_HEADER*>(_pImageHdr64 + 1);
+        GetHeaderData( _pImageHdr64 );
     }
     else
     {
         _is64 = false;
-
-        _imgBase = _pImageHdr32->OptionalHeader.ImageBase;
-        _imgSize = _pImageHdr32->OptionalHeader.SizeOfImage;
-        _hdrSize = _pImageHdr32->OptionalHeader.SizeOfHeaders;
-        _epRVA   = _pImageHdr32->OptionalHeader.AddressOfEntryPoint;
-        _subsystem = _pImageHdr32->OptionalHeader.Subsystem;
-
-        pSection = reinterpret_cast<const IMAGE_SECTION_HEADER*>(_pImageHdr32 + 1);
+        GetHeaderData( _pImageHdr32 );
     }
 
     // Exe file
@@ -203,9 +197,22 @@ NTSTATUS PEImage::Parse( void* pImageBase /*= nullptr*/ )
 
     _isPureIL = (pCorHdr && (pCorHdr->Flags & COMIMAGE_FLAGS_ILONLY)) ? true : false;
 
+    if (_isPureIL)
+    {
+        _ILFlagOffset = static_cast<int32_t>(
+            reinterpret_cast<uint8_t*>(pCorHdr)
+            - reinterpret_cast<uint8_t*>(_pFileBase.get())
+            + static_cast<int32_t>(offsetof( IMAGE_COR20_HEADER, Flags )));
+
+#ifdef COMPILER_MSVC
+        if (_netImage.Init( _imagePath ))
+            _netImage.Parse();
+#endif
+    }
+
     // Sections
     for (int i = 0; i < _pImageHdr32->FileHeader.NumberOfSections; ++i, ++pSection)
-        _sections.push_back( *pSection );
+        _sections.emplace_back( *pSection );
 
     return STATUS_SUCCESS;
 }
@@ -236,7 +243,7 @@ mapImports& PEImage::GetImports( bool useDelayed /*= false*/ )
             while (_is64 ? THK64( pRVA )->u1.AddressOfData : THK32( pRVA )->u1.AddressOfData)
             {
                 uint64_t AddressOfData = _is64 ? THK64( pRVA )->u1.AddressOfData : THK32( pRVA )->u1.AddressOfData;
-                auto pAddressTable = reinterpret_cast<IMAGE_IMPORT_BY_NAME*>(ResolveRVAToVA( static_cast<size_t>(AddressOfData) ));
+                auto pAddressTable = reinterpret_cast<IMAGE_IMPORT_BY_NAME*>(ResolveRVAToVA( static_cast<uintptr_t>(AddressOfData) ));
                 ImportData data;
 
                 // import by name
@@ -288,7 +295,7 @@ mapImports& PEImage::GetImports( bool useDelayed /*= false*/ )
             {
                 uint64_t AddressOfData = _is64 ? THK64( pRVA )->u1.AddressOfData : THK32( pRVA )->u1.AddressOfData;
                 
-                auto* pAddressTable = reinterpret_cast<IMAGE_IMPORT_BY_NAME*>(ResolveRVAToVA( static_cast<size_t>(AddressOfData) ));
+                auto* pAddressTable = reinterpret_cast<IMAGE_IMPORT_BY_NAME*>(ResolveRVAToVA( static_cast<uintptr_t>(AddressOfData) ));
                 ImportData data;
 
                 // import by name
@@ -310,7 +317,7 @@ mapImports& PEImage::GetImports( bool useDelayed /*= false*/ )
                     data.ptrRVA = pImportTbl->FirstThunk + IAT_Index;
                 // Save address to OrigianlFirstThunk
                 else
-                    data.ptrRVA = static_cast<size_t>(AddressOfData) - reinterpret_cast<size_t>(_pFileBase);
+                    data.ptrRVA = static_cast<uintptr_t>(AddressOfData) - reinterpret_cast<uintptr_t>(_pFileBase.get());
 
                 _imports[dllStr].emplace_back( data );
 
@@ -329,23 +336,24 @@ mapImports& PEImage::GetImports( bool useDelayed /*= false*/ )
 /// Retrieve all exported functions with names
 /// </summary>
 /// <param name="names">Found exports</param>
-BLACKBONE_API void PEImage::GetExports( vecExports& exports )
+void PEImage::GetExports( vecExports& exports )
 {
     exports.clear();
+    Reload();
 
     auto pExport = reinterpret_cast<PIMAGE_EXPORT_DIRECTORY>(DirectoryAddress( IMAGE_DIRECTORY_ENTRY_EXPORT ));
     if (pExport == 0)
         return;
 
-    DWORD *pAddressOfNames = reinterpret_cast<DWORD*>(pExport->AddressOfNames + reinterpret_cast<size_t>(_pFileBase));
-    DWORD *pAddressOfFuncs = reinterpret_cast<DWORD*>(pExport->AddressOfFunctions + reinterpret_cast<size_t>(_pFileBase));
-    WORD  *pAddressOfOrds  = reinterpret_cast<WORD*> (pExport->AddressOfNameOrdinals + reinterpret_cast<size_t>(_pFileBase));
+    DWORD *pAddressOfNames = reinterpret_cast<DWORD*>(pExport->AddressOfNames + reinterpret_cast<uintptr_t>(_pFileBase.get()));
+    DWORD *pAddressOfFuncs = reinterpret_cast<DWORD*>(pExport->AddressOfFunctions + reinterpret_cast<uintptr_t>(_pFileBase.get()));
+    WORD  *pAddressOfOrds  = reinterpret_cast<WORD*> (pExport->AddressOfNameOrdinals + reinterpret_cast<size_t>(_pFileBase.get()));
 
     for (DWORD i = 0; i < pExport->NumberOfNames; ++i)
-        exports.push_back( ExportData( reinterpret_cast<const char*>(_pFileBase)+pAddressOfNames[i], pAddressOfFuncs[pAddressOfOrds[i]] ) );
+        exports.push_back( ExportData( reinterpret_cast<const char*>(_pFileBase.get())+pAddressOfNames[i], pAddressOfFuncs[pAddressOfOrds[i]] ) );
 
     std::sort( exports.begin(), exports.end() );
-    return;
+    return Release( true );
 }
 
 /// <summary>
@@ -354,46 +362,14 @@ BLACKBONE_API void PEImage::GetExports( vecExports& exports )
 /// <param name="index">Directory index</param>
 /// <param name="keepRelative">Keep address relative to image base</param>
 /// <returns>Directory address</returns>
-size_t PEImage::DirectoryAddress( int index, bool keepRelative /*= false*/ ) const
+uintptr_t PEImage::DirectoryAddress( int index, AddressType type /*= VA*/ ) const
 {
     // Sanity check
     if (index < 0 || index >= IMAGE_NUMBEROF_DIRECTORY_ENTRIES)
         return 0;
 
-    const IMAGE_DATA_DIRECTORY* idd = _is64 ? _pImageHdr64->OptionalHeader.DataDirectory 
-                                            : _pImageHdr32->OptionalHeader.DataDirectory;
-
-    if (idd[index].VirtualAddress == 0)
-        return 0;
-    else
-        return ResolveRVAToVA( idd[index].VirtualAddress, keepRelative );
-}
-
-/// <summary>
-/// Resolve virtual memory address to physical file offset
-/// </summary>
-/// <param name="Rva">Memory address</param>
-/// <param name="keepRelative">Keep address relative to file start</param>
-/// <returns>Resolved address</returns>
-size_t PEImage::ResolveRVAToVA( size_t Rva, bool keepRelative /*= false*/ ) const
-{
-    if (_isPlainData)
-    {
-        for (auto& sec : _sections)
-        {
-            if (Rva >= sec.VirtualAddress && Rva <= sec.VirtualAddress + sec.Misc.VirtualSize)
-            {
-                if (keepRelative)
-                    return  (Rva - sec.VirtualAddress + sec.PointerToRawData);
-                else
-                    return reinterpret_cast<size_t>(_pFileBase)+(Rva - sec.VirtualAddress + sec.PointerToRawData);
-            }
-        }
-
-        return 0;
-    }
-    else
-        return (keepRelative ? Rva : (reinterpret_cast<size_t>(_pFileBase) + Rva));
+    const auto idd = _is64 ? _pImageHdr64->OptionalHeader.DataDirectory  : _pImageHdr32->OptionalHeader.DataDirectory;
+    return idd[index].VirtualAddress == 0 ? 0 : ResolveRVAToVA( idd[index].VirtualAddress, type );
 }
 
 /// <summary>
@@ -407,15 +383,47 @@ size_t PEImage::DirectorySize( int index ) const
     if (index < 0 || index >= IMAGE_NUMBEROF_DIRECTORY_ENTRIES)
         return 0;
 
-    const IMAGE_DATA_DIRECTORY* idd = _is64 ? _pImageHdr64->OptionalHeader.DataDirectory 
-                                            : _pImageHdr32->OptionalHeader.DataDirectory;
-
-    if (idd[index].VirtualAddress == 0)
-        return 0;
-    else
-        return static_cast<size_t>(idd[index].Size);
+    const IMAGE_DATA_DIRECTORY* idd = _is64 ? _pImageHdr64->OptionalHeader.DataDirectory : _pImageHdr32->OptionalHeader.DataDirectory;
+    return idd[index].VirtualAddress != 0 ? static_cast<size_t>(idd[index].Size) : 0;
 }
 
+
+/// <summary>
+/// Resolve virtual memory address to physical file offset
+/// </summary>
+/// <param name="Rva">Memory address</param>
+/// <param name="keepRelative">Keep address relative to file start</param>
+/// <returns>Resolved address</returns>
+uintptr_t PEImage::ResolveRVAToVA( uintptr_t Rva, AddressType type /*= VA*/ ) const
+{
+    switch (type)
+    {
+    case blackbone::pe::RVA:
+        return Rva;
+
+    case blackbone::pe::VA:
+    case blackbone::pe::RPA:
+        if (_isPlainData)
+        {
+            for (auto& sec : _sections)
+            {
+                if (Rva >= sec.VirtualAddress && Rva < sec.VirtualAddress + sec.Misc.VirtualSize)
+                    if (type == VA)
+                        return reinterpret_cast<uintptr_t>(_pFileBase.get()) + Rva - sec.VirtualAddress + sec.PointerToRawData;
+                    else
+                        return Rva - sec.VirtualAddress + sec.PointerToRawData;
+            }
+
+            return 0;
+        }
+        else
+            return (type == VA) ? (reinterpret_cast<uintptr_t>(_pFileBase.get()) + Rva) : Rva;
+
+    default:
+        return 0;
+    }
+
+}
 
 /// <summary>
 /// Retrieve image TLS callbacks
@@ -432,9 +440,11 @@ int PEImage::GetTLSCallbacks( module_t targetBase, std::vector<ptr_t>& result ) 
         return 0;
 
     uint64_t offset = _is64 ? TLS64( pTls )->AddressOfCallBacks : TLS32( pTls )->AddressOfCallBacks;
+    if (offset == 0)
+        return 0;
 
     // Not at base
-    if (imageBase() != reinterpret_cast<module_t>(_pFileBase))
+    if (imageBase() != reinterpret_cast<module_t>(_pFileBase.get()))
         pCallback = reinterpret_cast<uint64_t*>(ResolveRVAToVA( static_cast<size_t>(offset - imageBase()) ));
     else
         pCallback = reinterpret_cast<uint64_t*>(offset);
@@ -480,14 +490,14 @@ NTSTATUS PEImage::PrepareACTX( const wchar_t* filepath /*= nullptr*/ )
 
         GetTempPathW( ARRAYSIZE( tempDir ), tempDir );
         if (GetTempFileNameW( tempDir, L"ImageManifest", 0, tempPath ) == 0)
-            return STATUS_UNSUCCESSFUL;
+            return STATUS_SXS_CANT_GEN_ACTCTX;
      
-        HANDLE hTmpFile = CreateFileW( tempPath, FILE_GENERIC_WRITE, 0, NULL, OPEN_ALWAYS, 0, NULL );
-        if (hTmpFile != INVALID_HANDLE_VALUE)
+        auto hTmpFile = Handle( CreateFileW( tempPath, FILE_GENERIC_WRITE, 0, NULL, OPEN_ALWAYS, 0, NULL ) );
+        if (hTmpFile)
         {
             DWORD bytes = 0;
             WriteFile( hTmpFile, pManifest, manifestSize, &bytes, NULL );
-            CloseHandle( hTmpFile );
+            hTmpFile.reset();
 
             act.lpSource = tempPath;
             _manifestPath = tempPath;
@@ -506,8 +516,7 @@ NTSTATUS PEImage::PrepareACTX( const wchar_t* filepath /*= nullptr*/ )
    
     // Create ACTX
     _hctx = CreateActCtxW( &act );
-
-    if (_hctx != INVALID_HANDLE_VALUE)
+    if (_hctx)
         return STATUS_SUCCESS;
 
     // Return success if current process is protected
@@ -526,7 +535,7 @@ NTSTATUS PEImage::PrepareACTX( const wchar_t* filepath /*= nullptr*/ )
 /// <param name="size">Manifest size</param>
 /// <param name="manifestID">Mmanifest ID</param>
 /// <returns>Manifest data</returns>
-void* PEImage::GetManifest( uint32_t& size, int& manifestID )
+void* PEImage::GetManifest( uint32_t& size, int32_t& manifestID )
 {
     // 3 levels of pointers to nodes
     const IMAGE_RESOURCE_DIRECTORY_ENTRY *pDirNode1 = nullptr;
@@ -536,7 +545,6 @@ void* PEImage::GetManifest( uint32_t& size, int& manifestID )
     // 3 levels of nodes
     const IMAGE_RESOURCE_DIRECTORY       *pDirNodePtr1 = nullptr;
     const IMAGE_RESOURCE_DIRECTORY       *pDirNodePtr2 = nullptr;
-    const IMAGE_RESOURCE_DIRECTORY       *pDirNodePtr3 = nullptr;
 
     // resource entry data
     const IMAGE_RESOURCE_DATA_ENTRY      *pDataNode = nullptr;
@@ -586,7 +594,6 @@ void* PEImage::GetManifest( uint32_t& size, int& manifestID )
             // Check if this is a valid manifest resource
             if (pDirNode2->Id == 1 || pDirNode2->Id == 2 || pDirNode2->Id == 3)
             {
-                pDirNodePtr3 = reinterpret_cast<const IMAGE_RESOURCE_DIRECTORY*>(secBase + pDirNode2->OffsetToDirectory);
                 ofst_3 = pDirNode2->OffsetToDirectory + sizeof( IMAGE_RESOURCE_DIRECTORY );
                 pDirNode3 = reinterpret_cast<const IMAGE_RESOURCE_DIRECTORY_ENTRY*>(secBase + ofst_3);
                 pDataNode = reinterpret_cast<const IMAGE_RESOURCE_DATA_ENTRY*>(secBase + pDirNode3->OffsetToData);

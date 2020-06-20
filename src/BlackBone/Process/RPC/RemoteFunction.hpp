@@ -1,215 +1,261 @@
 #pragma once
 
-#include "../../Asm/AsmHelperBase.h"
+#include "../../Include/CallResult.h"
+#include "../../Asm/IAsmHelper.h"
 #include "../Process.h"
+
+#include <type_traits>
 
 // TODO: Find more elegant way to deduce calling convention
 //       than defining each one manually
 
 namespace blackbone
 {
-    
-/// <summary>
-/// Base class for remote function pointer
-/// </summary>
-template< typename Fn >
-class RemoteFuncBase
+template<eCalligConvention Conv, typename R, typename... Args>
+class RemoteFunctionBase
 {
 public:
-    typedef Fn type;    // Function pointer type
+    using ReturnType = std::conditional_t<std::is_same_v<R, void>, int, R>;
 
-protected:
-
-    RemoteFuncBase( Process& proc, eCalligConvention conv )
-        : _callConv( conv )
-        , _process( proc )
-        , _pfn( nullptr ) { }
-
-    RemoteFuncBase( Process& proc, type ptr, eCalligConvention conv )
-        : _callConv( conv )
-        , _process( proc )
-        , _pfn( ptr )  { }
-
-// conditional expression is constant
-#pragma warning(disable : 4127)
-
-    /// <summary>
-    /// Perform remote function call
-    /// </summary>
-    /// <param name="result">Function result</param>
-    /// <param name="args">Function arguments</param>
-    /// <param name="contextThread">Execution thread</param>
-    /// <returns>Call status</returns>
-    template<typename T>
-    NTSTATUS Call( T& result, std::vector<AsmVariant>& args, Thread* contextThread = nullptr )
+    struct CallArguments
     {
-        uint64_t result2 = 0;
-        AsmJitHelper a;
+        CallArguments( const Args&... args )
+            : arguments{ AsmVariant( args )... }
+        { 
+        }
+
+        template<size_t... S>
+        CallArguments( const std::tuple<Args...>& args, std::index_sequence<S...> )
+            : arguments{ std::get<S>( args )... }
+        {
+        }
+
+        CallArguments( const std::initializer_list<AsmVariant>& args )
+            : arguments{ args }
+        {
+            // Since initializer_list can't be moved from, dataStruct types must be fixed
+            for (auto& arg : arguments)
+            {
+                if (!arg.buf.empty())
+                    arg.imm_val = reinterpret_cast<uintptr_t>(arg.buf.data());
+            }
+        }
+
+        // Manually set argument to custom value
+        void set( int pos, const AsmVariant& newVal )
+        {
+            if (arguments.size() > static_cast<size_t>(pos))
+                arguments[pos] = newVal;
+        }
+
+        std::vector<AsmVariant> arguments;
+    };
+
+public:
+    RemoteFunctionBase( Process& proc, ptr_t ptr )
+        : _process( proc )
+        , _ptr( ptr )
+    {
+        static_assert(
+            (... && !std::is_reference_v<Args>),
+            "Please replace reference type with pointer type in function type specification"
+            );
+    }
+
+    call_result_t<ReturnType> Call( CallArguments& args, ThreadPtr contextThread = nullptr )
+    {
+        ReturnType result = {};
+        uint64_t tmpResult = 0;
+        NTSTATUS status = STATUS_SUCCESS;
+        auto a = AsmFactory::GetAssembler( _process.core().isWow64() );
 
         // Ensure RPC environment exists
-        if (!NT_SUCCESS( _process.remote().CreateRPCEnvironment( contextThread == _process.remote().getWorker(), contextThread != nullptr ) ))
-            return LastNtStatus();
+        status = _process.remote().CreateRPCEnvironment( Worker_None, contextThread != nullptr );
+        if (!NT_SUCCESS( status ))
+            return call_result_t<ReturnType>( result, status );
 
         // FPU check
-        bool isFloat  = std::is_same<T, float>::value;
-        bool isDouble = std::is_same<T, double>::value || std::is_same<T, long double>::value;
+        constexpr bool isFloat = std::is_same_v<ReturnType, float>;
+        constexpr bool isDouble = std::is_same_v<ReturnType, double> || std::is_same_v<ReturnType, long double>;
 
         // Deduce return type
         eReturnType retType = rt_int32;
 
-        if (isFloat)
+        if constexpr (isFloat)
             retType = rt_float;
-        else if (isDouble)
+        else if constexpr (isDouble)
             retType = rt_double;
-        else if (sizeof(T) == sizeof(uint64_t))
+        else if constexpr (sizeof( ReturnType ) == sizeof( uint64_t ))
             retType = rt_int64;
-        else if (!std::is_reference<T>::value && sizeof(T) > sizeof(uint64_t))
+        else if constexpr (!std::is_reference_v<ReturnType> && sizeof( ReturnType ) > sizeof( uint64_t ))
             retType = rt_struct;
 
-        auto pfnNew = brutal_cast<const void*>(_pfn);
-
-        _process.remote().PrepareCallAssembly( a, pfnNew, args, _callConv, retType );
+        _process.remote().PrepareCallAssembly( *a, _ptr, args.arguments, Conv, retType );
 
         // Choose execution thread
-        if (contextThread == nullptr)
-            _process.remote().ExecInNewThread( a->make(), a->getCodeSize(), result2 );
-        else if (*contextThread == _process.remote()._hWorkThd)
-            _process.remote().ExecInWorkerThread( a->make(), a->getCodeSize(), result2 );
+        if (!contextThread)
+        {
+            status = _process.remote().ExecInNewThread( (*a)->make(), (*a)->getCodeSize(), tmpResult );
+        }
+        else if (contextThread == _process.remote().getWorker())
+        {
+            status = _process.remote().ExecInWorkerThread( (*a)->make(), (*a)->getCodeSize(), tmpResult );
+        }
         else
-            _process.remote().ExecInAnyThread( a->make(), a->getCodeSize(), result2, *contextThread );
+        {
+            status = _process.remote().ExecInAnyThread( (*a)->make(), (*a)->getCodeSize(), tmpResult, contextThread );
+        }
 
         // Get function return value
-        _process.remote().GetCallResult( result );
+        if (!NT_SUCCESS( status ) || !NT_SUCCESS( status = _process.remote().GetCallResult( result ) ))
+            return call_result_t<ReturnType>( result, status );
 
-        return STATUS_SUCCESS;
-    }
-
-#pragma warning(default : 4127)
-
-    inline type ptr() const { return _pfn; }
-
-private:
-    RemoteFuncBase( const RemoteFuncBase& ) = delete;
-    RemoteFuncBase& operator =(const RemoteFuncBase&) = delete;
-
-private:
-    eCalligConvention _callConv;    // Calling convention
-    Process&          _process;     // Underlying process
-    type              _pfn;         // Function pointer
-};
-
-// Function arguments
-template<typename... Args>
-class FuncArguments
-{
-    static const size_t arg_count = sizeof...(Args);
-
-public:
-
-    // Get arguments. Either in variant form, or as declared type
-    inline std::vector<AsmVariant>& getArgsRaw() const { return _args; }
-    inline const std::tuple<Args...>& getArgs() const { return _targs; }
-
-    // Get argument by index
-    // Index is zero-based
-    template<int pos>
-    decltype(std::get<pos>( std::tuple<Args...>() )) getArg()
-    {
-        return std::get<pos>( this->_targs );
-    }
-
-    // Update any changes to arguments passed by reference or pointer
-    void updateArgs() const
-    {
-        for (auto& arg : _args)
+        // Update arguments
+        for (auto& arg : args.arguments)
             if (arg.type == AsmVariant::dataPtr)
-                _process.memory().Read( arg.new_imm_val, arg.size, (void*)arg.imm_val );
+                _process.memory().Read( arg.new_imm_val, arg.size, reinterpret_cast<void*>(arg.imm_val) );
+
+        return call_result_t<ReturnType>( result, STATUS_SUCCESS );
     }
 
-    // Manually set argument to custom value
-    void setArg( int pos, const AsmVariant& newVal )
+    call_result_t<ReturnType> Call( const Args&... args )
     {
-        if (_args.size() > (size_t)pos)
-            _args[pos] = newVal;
+        CallArguments a( args... );
+        return Call( a, nullptr );
     }
 
-protected:
-    template<typename... TArgs>
-    FuncArguments( Process& proc, TArgs&&... args )
-        : _args( std::vector < AsmVariant > { static_cast<Args&&>(args)... } ) 
-        , _targs( static_cast<Args&&>(args)... )
-        , _process( proc ) { }
+    call_result_t<ReturnType> Call( const std::tuple<Args...>& args, ThreadPtr contextThread = nullptr ) 
+    { 
+        CallArguments a( args, std::index_sequence_for<Args...>() ); 
+        return Call( a, contextThread ); 
+    } 
+        
+    call_result_t<ReturnType> Call( const std::initializer_list<AsmVariant>& args, ThreadPtr contextThread = nullptr ) 
+    { 
+        CallArguments a( args ); 
+        return Call( a, contextThread ); 
+    } 
+        
+    call_result_t<ReturnType> operator()( const Args&... args ) 
+    { 
+        CallArguments a( args... ); 
+        return Call( a ); 
+    } 
+        
+    auto MakeArguments( const Args&... args ) 
+    { 
+        return CallArguments( args... ); 
+    } 
+        
+    auto MakeArguments( const std::initializer_list<AsmVariant>& args ) 
+    { 
+        return CallArguments( args ); 
+    } 
+        
+    auto MakeArguments( const std::tuple<Args...>& args ) 
+    { 
+        return CallArguments( args, std::index_sequence_for<Args...>() ); 
+    }      
+
+    bool valid() const { return _ptr != 0; }
+    explicit operator bool() const { return valid(); }
 
 private:
-    FuncArguments( const FuncArguments& ) = delete;
-    FuncArguments& operator =(const FuncArguments&) = delete;
-
-private:
-    mutable std::vector<AsmVariant> _args;  // Generic arguments
-    mutable std::tuple<Args...> _targs;     // Real arguments
-    Process& _process;                      // Process routines
+    Process& _process;
+    ptr_t _ptr = 0;
 };
 
 // Remote function pointer
-template< typename Fn >
+template<typename Fn>
 class RemoteFunction;
-
-#define DECLPFN(CALL_OPT, CALL_DEF) \
-template< typename R, typename... Args > \
-class RemoteFunction< R( CALL_OPT* )(Args...) > : public RemoteFuncBase<R( CALL_OPT* )(Args...)>, public FuncArguments<Args...> \
-{ \
-public: \
-    typedef typename std::conditional<std::is_same<R, void>::value, int, R>::type ReturnType; \
-    \
-public: \
-    template<typename... TArgs> \
-    RemoteFunction( Process& proc, typename RemoteFuncBase<R( CALL_OPT* )(Args...)>::type ptr, TArgs&&... args ) \
-        : RemoteFuncBase<R( CALL_OPT* )(Args...)>( proc, ptr, CALL_DEF ) \
-        , FuncArguments<Args...>( proc, static_cast<Args&&>(args)... ) { } \
-        \
-    inline NTSTATUS Call( ReturnType& result, Thread* contextThread = nullptr ) \
-    { \
-        NTSTATUS status = RemoteFuncBase<R( CALL_OPT* )(Args...)>::Call( result, FuncArguments<Args...>::getArgsRaw(), contextThread ); \
-        FuncArguments<Args...>::updateArgs( ); \
-        return status; \
-    } \
-}
 
 //
 // Calling convention specialization
 //
-DECLPFN( __cdecl, cc_cdecl );
+template<typename R, typename... Args> \
+class RemoteFunction <R( __cdecl* )(Args...)> : public RemoteFunctionBase<cc_cdecl, R, Args...>
+{
+public:
+    using RemoteFunctionBase::RemoteFunctionBase;
+
+    RemoteFunction( Process& proc, R( __cdecl* ptr )(Args...) )
+        : RemoteFunctionBase( proc, reinterpret_cast<ptr_t>(ptr) ) 
+    { 
+    }
+};
 
 // Under AMD64 these will be same declarations as __cdecl, so compilation will fail.
 #ifdef USE32
-DECLPFN( __stdcall,  cc_stdcall  );
-DECLPFN( __thiscall, cc_thiscall );
-DECLPFN( __fastcall, cc_fastcall );
+template<typename R, typename... Args>
+class RemoteFunction <R( __stdcall* )(Args...)> : public RemoteFunctionBase<cc_stdcall, R, Args...>
+{
+public:
+    using RemoteFunctionBase::RemoteFunctionBase;
+
+    RemoteFunction( Process& proc, R( __stdcall* ptr )(Args...) )
+        : RemoteFunctionBase( proc, reinterpret_cast<ptr_t>(ptr) )
+    { 
+    }
+};
+
+template<typename R, typename... Args>
+class RemoteFunction <R( __thiscall* )(Args...)> : public RemoteFunctionBase<cc_thiscall, R, Args...>
+{
+public:
+    using RemoteFunctionBase::RemoteFunctionBase;
+
+    RemoteFunction( Process& proc, R( __thiscall* ptr )(Args...) )
+        : RemoteFunctionBase( proc, reinterpret_cast<ptr_t>(ptr) ) 
+    { 
+    }
+};
+
+template<typename R, typename... Args>
+class RemoteFunction <R( __fastcall* )(Args...)> : public RemoteFunctionBase<cc_fastcall, R, Args...>
+{
+public:
+    using RemoteFunctionBase::RemoteFunctionBase;
+
+    RemoteFunction( Process& proc, R( __fastcall* ptr )(Args...) )
+        : RemoteFunctionBase( proc, reinterpret_cast<ptr_t>(ptr) ) 
+    { 
+    }
+};
 #endif
 
-// Class member function
-template< class C, typename R, typename... Args >
-class RemoteFunction< R( C::* )(Args...) > : public RemoteFuncBase<R( C::* )(C*, Args...)>, public FuncArguments<C*, Args...>
+/// <summary>
+/// Get remote function object
+/// </summary>
+/// <param name="ptr">Function address in the remote process</param>
+/// <returns>Function object</returns>
+template<typename T>
+RemoteFunction<T> MakeRemoteFunction( Process& process, ptr_t ptr )
 {
-public: 
-    typedef typename std::conditional<std::is_same<R, void>::value, int, R>::type ReturnType;
-    typedef ReturnType( C::*type )(Args...);
+    return RemoteFunction<T>( process, ptr );
+}
 
-public: 
-    RemoteFunction( Process& proc, type ptr )
-        : RemoteFuncBase( proc, ptr, cc_thiscall )
-        , FuncArguments( proc ) { }
-    
-    RemoteFunction( Process& proc, type ptr, C* pClass, Args&&... args )
-        : RemoteFuncBase( proc, reinterpret_cast<typename RemoteFuncBase::type>(ptr), cc_thiscall )
-        , FuncArguments( proc, pClass, args... ) { }
-        
-    inline NTSTATUS Call( R& result, Thread* contextThread = nullptr )
-    {
-        NTSTATUS status = RemoteFuncBase<R( C::* )(C*, Args...)>::Call( result, getArgsRaw(), contextThread );
-        FuncArguments<C*, Args...>::updateArgs();
-        return status;
-    } 
-};
+/// <summary>
+/// Get remote function object
+/// </summary>
+/// <param name="ptr">Function address in the remote process</param>
+/// <returns>Function object</returns>
+template<typename T>
+RemoteFunction<T> MakeRemoteFunction( Process& process, T ptr )
+{
+    return RemoteFunction<T>( process, ptr );
+}
+
+/// <summary>
+/// Get remote function object
+/// </summary>
+/// <param name="modName">Remote module name</param>
+/// <param name="name_ord">Function name or ordinal</param>
+/// <returns>Function object</returns>
+template<typename T>
+RemoteFunction<T> MakeRemoteFunction( Process& process, const std::wstring& modName, const char* name_ord )
+{
+    auto ptr = process.modules().GetExport( modName, name_ord );
+    return RemoteFunction<T>( process, ptr ? ptr->procAddress : 0 );
+}
 
 }

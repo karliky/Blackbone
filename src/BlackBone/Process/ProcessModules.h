@@ -2,8 +2,11 @@
 
 #include "../Config.h"
 #include "../Include/Winheaders.h"
+#include "../Include/CallResult.h"
+#include "../Include/Types.h"
 #include "../PE/PEImage.h"
 #include "../Misc/Utils.h"
+#include "Threads/Thread.h"
 
 #include <string>
 #include <map>
@@ -42,7 +45,7 @@ struct exportData
 class ProcessModules
 {
 public:
-    typedef std::unordered_map<std::pair<std::wstring, eModType>, ModuleData> mapModules;
+    using mapModules = std::unordered_map<std::pair<std::wstring, eModType>, ModuleDataPtr> ;
 
 public:
     BLACKBONE_API ProcessModules( class Process& proc );
@@ -53,9 +56,9 @@ public:
     /// </summary>
     /// <param name="name">Module name</param>
     /// <param name="type">Module type. 32 bit or 64 bit</param>
-    /// <param name="search">Saerch type.</param>
+    /// <param name="search">Search type.</param>
     /// <returns>Module data. nullptr if not found</returns>
-    BLACKBONE_API const ModuleData* GetModule(
+    BLACKBONE_API ModuleDataPtr GetModule(
         const std::wstring& name,
         eModSeachType search = LdrList,
         eModType type = mt_default
@@ -64,11 +67,12 @@ public:
     /// <summary>
     /// Get module by name
     /// </summary>
-    /// <param name="name">TModule name.</param>
+    /// <param name="name">Module name.</param>
+    /// <param name="search">Search type.</param>
     /// <param name="type">Module type. 32 bit or 64 bit</param>
     /// <param name="baseModule">Import module name. Used only to resolve ApiSchema during manual map</param>
     /// <returns>Module data. nullptr if not found</returns>
-    BLACKBONE_API const ModuleData* GetModule(
+    BLACKBONE_API ModuleDataPtr GetModule(
         std::wstring& name,
         eModSeachType search = LdrList,
         eModType type = mt_default,
@@ -79,11 +83,13 @@ public:
     /// Get module by base address
     /// </summary>
     /// <param name="modBase">Module base address</param>
+    /// <param name="strict">If true modBase must exactly match module base address</param>
+    /// <param name="search">Search type.</param>
     /// <param name="type">Module type. 32 bit or 64 bit</param>
-    /// <param name="search">Saerch type.</param>
     /// <returns>Module data. nullptr if not found</returns>
-    BLACKBONE_API const ModuleData* GetModule(
+    BLACKBONE_API ModuleDataPtr GetModule(
         module_t modBase,
+        bool strict = true,
         eModSeachType search = LdrList,
         eModType type = mt_default
         );
@@ -92,20 +98,20 @@ public:
     /// Get process main module
     /// </summary>
     /// <returns>Module data. nullptr if not found</returns>
-    BLACKBONE_API  const ModuleData* GetMainModule();
+    BLACKBONE_API ModuleDataPtr GetMainModule();
 
     /// <summary>
     /// Enumerate all process modules
     /// </summary>
     /// <param name="search">Search method</param>
     /// <returns>Module list</returns>
-    BLACKBONE_API const ProcessModules::mapModules& GetAllModules( eModSeachType search = LdrList );
+    BLACKBONE_API const mapModules& GetAllModules( eModSeachType search = LdrList );
 
     /// <summary>
     /// Get list of manually mapped modules
     /// </summary>
-    /// <param name="mods">List of modules</param>
-    BLACKBONE_API void GetManualModules( ProcessModules::mapModules& mods );
+    /// <returns>List of modules</returns>
+    BLACKBONE_API mapModules GetManualModules();
 
     /// <summary>
     /// Get export address. Forwarded exports will be automatically resolved if forward module is present
@@ -114,15 +120,52 @@ public:
     /// <param name="name_ord">Function name or ordinal</param>
     /// <param name="baseModule">Import module name. Only used to resolve ApiSchema during manual map.</param>
     /// <returns>Export info. If failed procAddress field is 0</returns>
-    BLACKBONE_API exportData GetExport( const ModuleData* hMod, const char* name_ord, const wchar_t* baseModule = L"" );
+    BLACKBONE_API call_result_t<exportData> GetExport( 
+        const ModuleDataPtr& hMod, 
+        const char* name_ord, 
+        const wchar_t* baseModule = L"" 
+    );
+
+    /// <summary>
+    /// Get export address. Forwarded exports will be automatically resolved if forward module is present
+    /// </summary>
+    /// <param name="hMod">Module to search in</param>
+    /// <param name="name_ord">Function name or ordinal</param>
+    /// <param name="baseModule">Import module name. Only used to resolve ApiSchema during manual map.</param>
+    /// <returns>Export info. If failed procAddress field is 0</returns>
+    BLACKBONE_API call_result_t<exportData> GetExport(
+        const ModuleData& hMod,
+        const char* name_ord,
+        const wchar_t* baseModule = L""
+    );
+
+    /// <summary>
+    /// Get export address. Forwarded exports will be automatically resolved if forward module is present
+    /// </summary>
+    /// <param name="modName">Module name to search in</param>
+    /// <param name="name_ord">Function name or ordinal</param>
+    /// <returns>Export info. If failed procAddress field is 0</returns>
+    BLACKBONE_API call_result_t<exportData> GetExport( const std::wstring& modName, const char* name_ord );
+
+    /// <summary>
+    /// Get export from ntdll
+    /// </summary>
+    /// <param name="name_ord">Function name or ordinal</param>
+    /// <param name="type">Module type. 32 bit or 64 bit</param>
+    /// <param name="search">Search type.</param>
+    /// <returns>Export info. If failed procAddress field is 0</returns>
+    BLACKBONE_API call_result_t<exportData> GetNtdllExport(
+        const char* name_ord, 
+        eModType type = mt_default, 
+        eModSeachType search = LdrList 
+    );
 
     /// <summary>
     /// Inject image into target process
     /// </summary>
     /// <param name="path">Full-qualified image path</param>
-    /// <param name="pStatus">Injection status code</param>
     /// <returns>Module info. nullptr if failed</returns>
-    BLACKBONE_API const ModuleData* Inject( const std::wstring& path, NTSTATUS* pStatus = nullptr );
+    BLACKBONE_API call_result_t<ModuleDataPtr> Inject( const std::wstring& path, ThreadPtr pThread = nullptr );
 
 #ifdef COMPILER_MSVC
     /// <summary>
@@ -148,29 +191,30 @@ public:
     /// </summary>
     /// <param name="hMod">Module to unload</param>
     /// <returns>true on success</returns>
-    BLACKBONE_API bool Unload( const ModuleData* hMod );
+    BLACKBONE_API NTSTATUS Unload( const ModuleDataPtr& hMod );
 
     /// <summary>
     /// Unlink module from most loader structures
     /// </summary>
     /// <param name="mod">Module to unlink</param>
     /// <returns>true on success</returns>
-    BLACKBONE_API bool Unlink( const ModuleData* mod );
+    BLACKBONE_API bool Unlink( const ModuleDataPtr& mod );
+    BLACKBONE_API bool Unlink( const ModuleData& mod );
 
     /// <summary>
     /// Store manually mapped module in module list
     /// </summary>
-    /// <param name="FilePath">Full qualified module path</param>
-    /// <param name="base">Base address</param>
-    /// <param name="size">Module size</param>
-    /// <param name="mt">Module type. 32 bit or 64 bit</param>
+    /// <param name="mod">Module data</param>
     /// <returns>Module info</returns>
-    BLACKBONE_API const ModuleData* AddManualModule( 
-        const std::wstring& FilePath,
-        module_t base,
-        size_t size, 
-        eModType mt
-        );
+    BLACKBONE_API ModuleDataPtr AddManualModule( const ModuleData& mod );
+
+    /// <summary>
+    /// Canonicalize paths and set module type to manual if requested
+    /// </summary>
+    /// <param name="mod">Module data</param>
+    /// <param name="manual">Value to set ModuleData::manual to</param>
+    /// <returns>Module data</returns>
+    BLACKBONE_API ModuleData Canonicalize( const ModuleData& mod, bool manual );
 
     /// <summary>
     /// Remove module from module list
@@ -194,6 +238,8 @@ public:
 private:
     ProcessModules( const ProcessModules& ) = delete;
     ProcessModules operator =(const ProcessModules&) = delete;
+
+    void UpdateModuleCache( eModSeachType search, eModType type );
 
 private:
     class Process&       _proc;

@@ -2,7 +2,7 @@
 #include "ProcessCore.h"
 #include "../Misc/DynImport.h"
 #include "../Include/Macro.h"
-#include <VersionHelpers.h>
+#include <3rd_party/VersionApi.h>
 
 namespace blackbone
 {
@@ -14,7 +14,6 @@ namespace blackbone
 ProcessCore::ProcessCore()
     : _native( nullptr )
 {
-    DynImport::load( "GetProcessDEPPolicy", L"kernel32.dll" );
 }
 
 ProcessCore::~ProcessCore()
@@ -30,17 +29,14 @@ ProcessCore::~ProcessCore()
 /// <returns>Status</returns>
 NTSTATUS ProcessCore::Open( DWORD pid, DWORD access )
 {
-    // Prevent handle leak
-    Close();
-
     // Handle current process differently
     _hProcess = (pid == GetCurrentProcessId()) ? GetCurrentProcess() : OpenProcess( access, false, pid );
 
-    // Some routines in win10 does not support pseudo handle
+    // Some routines in win10 do not support pseudo handle
     if (IsWindows10OrGreater() && pid == GetCurrentProcessId())
         _hProcess = OpenProcess( PROCESS_ALL_ACCESS, FALSE, pid );
 
-    if (_hProcess != NULL)
+    if (_hProcess)
     {
         _pid = pid;
         return Init();
@@ -57,10 +53,12 @@ NTSTATUS ProcessCore::Open( DWORD pid, DWORD access )
 /// <returns>Status</returns>
 NTSTATUS ProcessCore::Open( HANDLE handle )
 {
-    Close();
-
     _hProcess = handle;
     _pid = GetProcessId( _hProcess );
+
+    // Some routines in win10 do not support pseudo handle
+    if (IsWindows10OrGreater() && _pid == GetCurrentProcessId())
+        _hProcess = OpenProcess( PROCESS_ALL_ACCESS, FALSE, _pid );
 
     return Init();
 }
@@ -78,7 +76,7 @@ NTSTATUS ProcessCore::Init()
 
     if (info.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_INTEL)
     {
-        _native.reset( new x86Native( _hProcess ) );
+        _native = std::make_unique<x86Native>( _hProcess );
     }
     else
     {
@@ -87,9 +85,9 @@ NTSTATUS ProcessCore::Init()
         IsWow64Process( GetCurrentProcess(), &wowSrc );
 
         if (wowSrc == TRUE)
-            _native.reset( new NativeWow64( _hProcess ) );
+            _native = std::make_unique<NativeWow64>( _hProcess );
         else
-            _native.reset( new Native( _hProcess ) );
+            _native = std::make_unique<Native>( _hProcess );
     }
 
     // Get DEP info
@@ -115,14 +113,9 @@ NTSTATUS ProcessCore::Init()
 /// </summary>
 void ProcessCore::Close()
 {
-    if (_hProcess)
-    {
-        CloseHandle( _hProcess );
-
-        _hProcess = NULL;
-        _pid = 0;
-        _native.reset( nullptr );
-    }
+    _hProcess.reset();
+    _native.reset();
+    _pid = 0;
 }
 
 bool ProcessCore::isProtected()

@@ -1,4 +1,5 @@
 #include "Utils.h"
+#include "Private.h"
 #include <ntstrsafe.h>
 
 #pragma alloc_text(PAGE, BBSafeAllocateString)
@@ -19,7 +20,7 @@ NTSTATUS BBSafeAllocateString( OUT PUNICODE_STRING result, IN USHORT size )
     if (result == NULL || size == 0)
         return STATUS_INVALID_PARAMETER;
 
-    result->Buffer = ExAllocatePoolWithTag( PagedPool, size, 'enoB' );
+    result->Buffer = ExAllocatePoolWithTag( PagedPool, size, BB_POOL_TAG );
     result->Length = 0;
     result->MaximumLength = size;
 
@@ -51,7 +52,7 @@ NTSTATUS BBSafeInitString( OUT PUNICODE_STRING result, IN PUNICODE_STRING source
         return STATUS_SUCCESS;
     }
 
-    result->Buffer = ExAllocatePoolWithTag( PagedPool, source->MaximumLength, 'enoB' );
+    result->Buffer = ExAllocatePoolWithTag( PagedPool, source->MaximumLength, BB_POOL_TAG );
     result->Length = source->Length;
     result->MaximumLength = source->MaximumLength;
 
@@ -78,10 +79,10 @@ LONG BBSafeSearchString( IN PUNICODE_STRING source, IN PUNICODE_STRING target, I
         return -1;
 
     USHORT diff = source->Length - target->Length;
-    for (USHORT i = 0; i < diff; i++)
+    for (USHORT i = 0; i <= (diff / sizeof( WCHAR )); i++)
     {
         if (RtlCompareUnicodeStrings(
-            source->Buffer + i / sizeof( WCHAR ),
+            source->Buffer + i,
             target->Length / sizeof( WCHAR ),
             target->Buffer,
             target->Length / sizeof( WCHAR ),
@@ -185,6 +186,54 @@ NTSTATUS BBFileExists( IN PUNICODE_STRING path )
     return status;
 }
 
+/// <summary>
+/// Search for pattern
+/// </summary>
+/// <param name="pattern">Pattern to search for</param>
+/// <param name="wildcard">Used wildcard</param>
+/// <param name="len">Pattern length</param>
+/// <param name="base">Base address for searching</param>
+/// <param name="size">Address range to search in</param>
+/// <param name="ppFound">Found location</param>
+/// <returns>Status code</returns>
+NTSTATUS BBSearchPattern( IN PCUCHAR pattern, IN UCHAR wildcard, IN ULONG_PTR len, IN const VOID* base, IN ULONG_PTR size, OUT PVOID* ppFound )
+{
+    ASSERT( ppFound != NULL && pattern != NULL && base != NULL );
+    if (ppFound == NULL || pattern == NULL || base == NULL)
+        return STATUS_INVALID_PARAMETER;
+
+    for (ULONG_PTR i = 0; i < size - len; i++)
+    {
+        BOOLEAN found = TRUE;
+        for (ULONG_PTR j = 0; j < len; j++)
+        {
+            if (pattern[j] != wildcard && pattern[j] != ((PCUCHAR)base)[i + j])
+            {
+                found = FALSE;
+                break;
+            }
+        }
+
+        if (found != FALSE)
+        {
+            *ppFound = (PUCHAR)base + i;
+            return STATUS_SUCCESS;
+        }
+    }
+
+    return STATUS_NOT_FOUND;
+}
+
+/// <summary>
+/// Check if process is terminating
+/// </summary>
+/// <param name="imageBase">Process</param>
+/// <returns>If TRUE - terminating</returns>
+BOOLEAN BBCheckProcessTermination( PEPROCESS pProcess )
+{
+    LARGE_INTEGER zeroTime = { 0 };
+    return KeWaitForSingleObject( pProcess, Executive, KernelMode, FALSE, &zeroTime ) == STATUS_WAIT_0;
+}
 
 ULONG GenPrologue32( IN PUCHAR pBuf )
 {
@@ -218,31 +267,31 @@ ULONG GenCall32V( IN PUCHAR pBuf, IN PVOID pFn, IN INT argc, IN va_list vl )
 {
     ULONG ofst = 0;
 
-    PULONG pArgBuf = ExAllocatePoolWithTag( PagedPool, argc * sizeof( ULONG ), 'enoB' );
+    PULONG pArgBuf = ExAllocatePoolWithTag( PagedPool, argc * sizeof( ULONG ), BB_POOL_TAG );
 
     // cast args
     for (INT i = 0; i < argc; i++)
     {
         PVOID arg = va_arg( vl, PVOID );
-        pArgBuf[i] = (ULONG)arg;
+        pArgBuf[i] = (ULONG)(ULONG_PTR)arg;
     }
 
     // push args
     for (INT i = argc - 1; i >= 0; i--)
     {
-        *(PUSHORT)(pBuf + ofst) = 0x68;             // push arg
-        *(PULONG)(pBuf + ofst + 1) = pArgBuf[i];    //
+        *(PUSHORT)(pBuf + ofst) = 0x68;                 // push arg
+        *(PULONG)(pBuf + ofst + 1) = pArgBuf[i];        //
         ofst += 5;
     }
 
-    *(PUCHAR)(pBuf + ofst) = 0xB8;                  // mov eax, pFn
-    *(PULONG)(pBuf + ofst + 1) = (ULONG)pFn;        //
+    *(PUCHAR)(pBuf + ofst) = 0xB8;                      // mov eax, pFn
+    *(PULONG)(pBuf + ofst + 1) = (ULONG)(ULONG_PTR)pFn; //
     ofst += 5;
 
-    *(PUSHORT)(pBuf + ofst) = 0xD0FF;               // call eax
+    *(PUSHORT)(pBuf + ofst) = 0xD0FF;                   // call eax
     ofst += 2;
 
-    ExFreePoolWithTag( pArgBuf, 'enoB' );
+    ExFreePoolWithTag( pArgBuf, BB_POOL_TAG );
 
     return ofst;
 }
@@ -259,11 +308,11 @@ ULONG GenSync32( IN PUCHAR pBuf, IN PNTSTATUS pStatus, IN PVOID pSetEvent, IN HA
     ofst += 2;
 
     *(PUCHAR)(pBuf + ofst) = 0x68;                  // push hEvent
-    *(PULONG)(pBuf + ofst + 1) = (ULONG)hEvent;     //
+    *(PULONG)(pBuf + ofst + 1) = (ULONG)(ULONG_PTR)hEvent;  //
     ofst += 5;
 
     *(PUCHAR)(pBuf + ofst) = 0xB8;                  // mov eax, pSetEvent
-    *(PULONG)(pBuf + ofst + 1) = (ULONG)pSetEvent;  //
+    *(PULONG)(pBuf + ofst + 1) = (ULONG)(ULONG_PTR)pSetEvent;//
     ofst += 5;
 
     *(PUSHORT)(pBuf + ofst) = 0xD0FF;               // call eax

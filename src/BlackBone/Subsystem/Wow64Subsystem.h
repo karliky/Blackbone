@@ -1,7 +1,6 @@
 #pragma once
 
 #include "NativeSubsystem.h"
-#include "Wow64Local.h"
 
 namespace blackbone
 {
@@ -20,7 +19,7 @@ public:
     /// <param name="flAllocationType">Allocation type</param>
     /// <param name="flProtect">Memory protection</param>
     /// <returns>Status code</returns>
-    virtual NTSTATUS VirualAllocExT( ptr_t& lpAddress, size_t dwSize, DWORD flAllocationType, DWORD flProtect );
+    virtual NTSTATUS VirtualAllocExT( ptr_t& lpAddress, size_t dwSize, DWORD flAllocationType, DWORD flProtect );
 
     /// <summary>
     /// Free virtual memory
@@ -29,7 +28,7 @@ public:
     /// <param name="dwSize">Region size</param>
     /// <param name="dwFreeType">Memory release type.</param>
     /// <returns>Status code</returns>
-    virtual NTSTATUS VirualFreeExT( ptr_t lpAddress, size_t dwSize, DWORD dwFreeType );
+    virtual NTSTATUS VirtualFreeExT( ptr_t lpAddress, size_t dwSize, DWORD dwFreeType );
 
     /// <summary>
     /// Change memory protection
@@ -138,6 +137,15 @@ public:
     virtual NTSTATUS SetThreadContextT( HANDLE hThread, _CONTEXT32& ctx );
 
     /// <summary>
+    /// NtQueueApcThread
+    /// </summary>
+    /// <param name="hThread">Thread handle.</param>
+    /// <param name="func">APC function</param>
+    /// <param name="arg">APC argument</param>
+    /// <returns>Status code</returns>
+    virtual NTSTATUS QueueApcT( HANDLE hThread, ptr_t func, ptr_t arg );
+
+    /// <summary>
     /// Get WOW64 PEB
     /// </summary>
     /// <param name="ppeb">Retrieved PEB</param>
@@ -164,9 +172,6 @@ public:
     /// <param name="ppeb">Retrieved TEB</param>
     /// <returns>TEB pointer</returns>
     virtual ptr_t getTEB( HANDLE hThread, _TEB64* pteb );
-
-private:
-    Wow64Local _local;     // WOW64 helpers
 };
 
 }

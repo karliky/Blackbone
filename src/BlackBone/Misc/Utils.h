@@ -2,6 +2,8 @@
 
 #include "../Include/Winheaders.h"
 #include <string>
+#include <vector>
+#include <tuple>
 
 namespace blackbone
 {
@@ -72,7 +74,7 @@ public:
     /// </summary>
     /// <param name="str">Source string.</param>
     /// <returns>Result string</returns>
-    BLACKBONE_API static std::wstring ToLower( const std::wstring& str );
+    BLACKBONE_API static std::wstring ToLower( std::wstring str );
 
     /// <summary>
     /// Generate random alpha-numeric string
@@ -153,4 +155,54 @@ private:
     CriticalSection& _cs;
 };
 
+
+/// <summary>
+/// System32 helper
+/// </summary>
+class FsRedirector
+{
+public:
+    FsRedirector( bool wow64 )
+        : _wow64( wow64 )
+    {
+#ifndef XP_BUILD
+        if (wow64)
+            Wow64DisableWow64FsRedirection( &_fsRedirection );
+#endif
+    }
+
+    ~FsRedirector()
+    {
+#ifndef XP_BUILD
+        if (_wow64)
+            Wow64RevertWow64FsRedirection( _fsRedirection );
+#endif
+    }
+
+private:
+    PVOID _fsRedirection = nullptr;
+    bool _wow64;
+};
+
+#if _MSC_VER >= 1900 
+namespace tuple_detail
+{
+    template<typename T, typename F, size_t... Is>
+    void visit_each( T&& t, F f, std::index_sequence<Is...> ) { auto l = { (f( std::get<Is>( t ) ), 0)... }; }
+
+    template<typename... Ts>
+    void copyTuple( std::tuple<Ts...> const& from, std::vector<char>& to )
+    {
+        auto func = [&to]( auto& v )
+        {
+            auto ptr = to.size();
+            to.resize( ptr + sizeof( v ) );
+            memcpy( to.data() + ptr, &v, sizeof( v ) );
+            return 0;
+        };
+
+        visit_each( from, func, std::index_sequence_for<Ts...>() );
+    }
+}
+#endif
 }

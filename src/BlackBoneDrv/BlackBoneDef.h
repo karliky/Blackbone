@@ -3,7 +3,15 @@
 #define BLACKBONE_DEVICE_NAME           L"BlackBone"
 #define BLACKBONE_DEVICE_FILE           L"\\\\.\\" BLACKBONE_DEVICE_NAME
 
-#define FILE_DEVICE_BLACKBONE           0x00008005
+#define FILE_DEVICE_BLACKBONE           0x8005
+
+#define BLACKBONE_FILE_EXT              L".sys"
+#define BLACKBONE_FILE_SUFFIX           L"Drv"
+#define BLACKBONE_FILE_NAME             BLACKBONE_DEVICE_NAME BLACKBONE_FILE_SUFFIX       BLACKBONE_FILE_EXT
+#define BLACKBONE_FILE_NAME_7           BLACKBONE_DEVICE_NAME BLACKBONE_FILE_SUFFIX L"7"  BLACKBONE_FILE_EXT
+#define BLACKBONE_FILE_NAME_8           BLACKBONE_DEVICE_NAME BLACKBONE_FILE_SUFFIX L"8"  BLACKBONE_FILE_EXT
+#define BLACKBONE_FILE_NAME_81          BLACKBONE_DEVICE_NAME BLACKBONE_FILE_SUFFIX L"81" BLACKBONE_FILE_EXT
+#define BLACKBONE_FILE_NAME_10          BLACKBONE_DEVICE_NAME BLACKBONE_FILE_SUFFIX L"10" BLACKBONE_FILE_EXT
 
 /*
     Disable process DEP
@@ -211,7 +219,6 @@
 */
 #define IOCTL_BLACKBONE_INJECT_DLL  (ULONG)CTL_CODE(FILE_DEVICE_BLACKBONE, 0x80B, METHOD_BUFFERED, FILE_READ_ACCESS | FILE_WRITE_ACCESS)
 
-
 /*
     Manually map system driver
 
@@ -246,6 +253,22 @@
 */
 #define IOCTL_BLACKBONE_UNLINK_HTABLE  (ULONG)CTL_CODE(FILE_DEVICE_BLACKBONE, 0x80D, METHOD_BUFFERED, FILE_READ_ACCESS | FILE_WRITE_ACCESS)
 
+/*
+Map entire address space of target process into calling process
+
+    Input:
+       ENUM_REGIONS
+
+    Input size: 
+        sizeof(ENUM_REGIONS)
+
+    Output:
+        ENUM_REGIONS_RESULT - enumerated regions
+
+    Output size:
+        >= sizeof(ENUM_REGIONS_RESULT)
+*/
+#define IOCTL_BLACKBONE_ENUM_REGIONS  (ULONG)CTL_CODE(FILE_DEVICE_BLACKBONE, 0x80E, METHOD_BUFFERED, FILE_READ_ACCESS | FILE_WRITE_ACCESS)
 
 
 /// <summary>
@@ -257,12 +280,24 @@ typedef struct _DISABLE_DEP
 } DISABLE_DEP, *PDISABLE_DEP;
 
 /// <summary>
+/// Policy activation option
+/// </summary>
+typedef enum _PolicyOpt
+{
+    Policy_Disable,
+    Policy_Enable,
+    Policy_Keep,        // Don't change current value
+} PolicyOpt;
+
+/// <summary>
 /// Input for IOCTL_BLACKBONE_SET_PROTECTION
 /// </summary>
 typedef struct _SET_PROC_PROTECTION
 {
-    ULONG   pid;            // Process ID
-    BOOLEAN enableState;    // TRUE to enable, FALSE to disable
+    ULONG pid;              // Process ID
+    PolicyOpt protection;   // Process protection
+    PolicyOpt dynamicCode;  // DynamiCode policy
+    PolicyOpt signature;    // BinarySignature policy
 } SET_PROC_PROTECTION, *PSET_PROC_PROTECTION;
 
 /// <summary>
@@ -421,6 +456,7 @@ typedef enum _MmapFlags
     KWipeHeader      = 0x04,    // Wipe image PE headers
     KHideVAD         = 0x10,    // Make image appear as PAGE_NOACESS region
     KRebaseProcess   = 0x40,    // If target image is an .exe file, process base address will be replaced with mapped module value
+    KNoThreads       = 0x80,    // Don't create new threads, use hijacking
 
     KNoExceptions    = 0x01000, // Do not create custom exception handler
     KNoSxS           = 0x08000, // Do not apply SxS activation context
@@ -461,3 +497,31 @@ typedef struct _UNLINK_HTABLE
 {
     ULONG      pid;         // Process ID
 } UNLINK_HTABLE, *PUNLINK_HTABLE;
+
+/// <summary>
+/// Input for IOCTL_BLACKBONE_ENUM_REGIONS
+/// </summary>
+typedef struct _ENUM_REGIONS
+{
+    ULONG      pid;         // Process ID
+} ENUM_REGIONS, *PENUM_REGIONS;
+
+typedef struct _MEM_REGION
+{
+    ULONGLONG BaseAddress;
+    ULONGLONG AllocationBase;
+    ULONG AllocationProtect;
+    ULONGLONG RegionSize;
+    ULONG State;
+    ULONG Protect;
+    ULONG Type;
+} MEM_REGION, *PMEM_REGION;
+
+/// <summary>
+/// Output for IOCTL_BLACKBONE_ENUM_REGIONS
+/// </summary>
+typedef struct _ENUM_REGIONS_RESULT
+{
+    ULONGLONG  count;                   // Number of records
+    MEM_REGION regions[1];              // Found regions, variable-sized
+} ENUM_REGIONS_RESULT, *PENUM_REGIONS_RESULT;

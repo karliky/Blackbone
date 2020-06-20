@@ -4,6 +4,7 @@
 #include "Thread.h"
 
 #include <vector>
+#include <mutex>
 
 namespace blackbone
 {
@@ -14,6 +15,9 @@ public:
     BLACKBONE_API ProcessThreads( class ProcessCore& core );
     BLACKBONE_API ~ProcessThreads();
 
+    ProcessThreads( const ProcessThreads& ) = delete;
+    ProcessThreads& operator =( const ProcessThreads& ) = delete;
+
     /// <summary>
     /// Create the thread.
     /// </summary>
@@ -21,57 +25,51 @@ public:
     /// <param name="arg">Thread argument.</param>
     /// <param name="flags">Thread creation flags</param>
     /// <returns>New thread object</returns>
-    BLACKBONE_API Thread CreateNew( ptr_t threadProc, ptr_t arg, enum CreateThreadFlags flags = (CreateThreadFlags)0 );
+    BLACKBONE_API call_result_t<ThreadPtr> CreateNew(
+        ptr_t threadProc,
+        ptr_t arg,
+        enum CreateThreadFlags flags = static_cast<CreateThreadFlags>(0)
+    );
 
     /// <summary>
     /// Gets all process threads
     /// </summary>
-    /// <param name="dontUpdate">Return already existing thread list</param>
     /// <returns>Threads collection</returns>
-    BLACKBONE_API std::vector<Thread>& getAll( bool dontUpdate = false );
+    BLACKBONE_API std::vector<ThreadPtr> getAll() const;
 
     /// <summary>
     /// Get main process thread
     /// </summary>
     /// <returns>Pointer to thread object, nullptr if failed</returns>
-    BLACKBONE_API Thread* getMain();
+    BLACKBONE_API ThreadPtr getMain() const;
 
     /// <summary>
     /// Get least executed thread
     /// </summary>
     /// <returns>Pointer to thread object, nullptr if failed</returns>
-    BLACKBONE_API Thread* getLeastExecuted();
+    BLACKBONE_API ThreadPtr getLeastExecuted() const;
 
     /// <summary>
     /// Get most executed thread
     /// </summary>
     /// <returns>Pointer to thread object, nullptr if failed</returns>
-    BLACKBONE_API Thread* getMostExecuted();
+    BLACKBONE_API ThreadPtr getMostExecuted() const;
 
     /// <summary>
     /// Get random thread
     /// </summary>
     /// <returns>Pointer to thread object, nullptr if failed</returns>
-    BLACKBONE_API Thread* getRandom();
+    BLACKBONE_API ThreadPtr getRandom() const;
 
     /// <summary>
     /// Get thread by ID
     /// </summary>
     /// <param name="id">Thread ID</param>
     /// <returns>Pointer to thread object, nullptr if failed</returns>
-    BLACKBONE_API Thread* get( DWORD id );
-
-    /// <summary>
-    /// Reset data
-    /// </summary>
-    BLACKBONE_API inline void reset() { _threads.clear(); }
+    BLACKBONE_API ThreadPtr get( DWORD id ) const;
 
 private:
-    ProcessThreads( const ProcessThreads& ) = delete;
-    ProcessThreads& operator =(const ProcessThreads&) = delete;
-private:
-    class ProcessCore& _core;       // Core process functions
-    std::vector<Thread> _threads;   // Process thread snapshot
+    class ProcessCore& _core;   // Core process functions
 };
 
 }

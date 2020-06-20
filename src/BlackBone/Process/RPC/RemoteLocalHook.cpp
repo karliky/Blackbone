@@ -3,12 +3,6 @@
 #include "../Process.h"
 #include "../../Asm/LDasm.h"
 
-#ifdef USE64
-#define HOOK_CTX_T(v, ctx) HookCtx64& v = ctx.hook64
-#else
-#define HOOK_CTX_T(v, ctx) HookCtx32& v = ctx.hook32
-#endif
-
 namespace blackbone
 {
 
@@ -17,44 +11,113 @@ RemoteLocalHook::RemoteLocalHook( class Process& process )
 {
 }
 
-
 RemoteLocalHook::~RemoteLocalHook()
 {
+    Restore();
 }
 
-NTSTATUS RemoteLocalHook::SetHook( ptr_t address, asmjit::Assembler& /*hook*/ )
+NTSTATUS RemoteLocalHook::AllocateMem( ptr_t /*address*/, size_t codeSize )
 {
-    HookCtx ctx = { { 0 } };
-    HOOK_CTX_T( ctx_t, ctx );
-    UNREFERENCED_PARAMETER( ctx_t );
+    auto pagesize = _process.core().native()->pageSize();
+    auto size = Align( codeSize, pagesize ) + Align( sizeof( _ctx ), pagesize );
 
-    // Already hooked
-    if (_hooks.count( address ) != 0)
-        return STATUS_ADDRESS_ALREADY_EXISTS;
+    auto allocation = _process.memory().Allocate( size, PAGE_EXECUTE_READWRITE );
+    if (!allocation)
+        return allocation.status;
 
-    auto memBlock = _process.memory().Allocate( 0x1000 );
-    if (!memBlock.valid())
-        return LastNtStatus();
+    _hookData   = std::move( allocation.result() );
+    _pHookCode  = _hookData.ptr();
+    _pThunkCode = _pHookCode + _hookData.size() - pagesize;
 
-    auto status = _process.memory().Read( address, sizeof( ctx_t.original_code ), ctx_t.original_code );
+    return allocation.status;
+}
+
+NTSTATUS RemoteLocalHook::SetHook( ptr_t address, asmjit::Assembler& hook )
+{
+    _address = address;
+    NTSTATUS status = AllocateMem( address, hook.getCodeSize() );
     if (!NT_SUCCESS( status ))
         return status;
 
-    // Copy original
-    uint8_t* codePtr = ctx_t.original_code;
-    ptr_t old = 0;
+    return _process.core().isWow64() ? SetHook32( address, hook ) : SetHook64( address, hook );
+}
+
+NTSTATUS RemoteLocalHook::SetHook32( ptr_t address, asmjit::Assembler& hook )
+{
+    NTSTATUS status = STATUS_SUCCESS;
+    auto& mem = _process.memory();
+
+    if (!CopyOldCode( address, false ))
+        return STATUS_PARTIAL_COPY;
+
+    _ctx.hook32.codeSize = 5;
+    _ctx.hook32.jmp.opcode = 0xE9;
+    _ctx.hook32.jmp.ptr = static_cast<int32_t>(_pThunkCode - address - 5);
+
+    uint8_t buf[0x1000] = { 0 };
+    hook.setBaseAddress( _hookData.ptr<int32_t>() );
+    hook.relocCode( buf );
+
+    mem.Write( _pHookCode, buf );
+    mem.Write( _pThunkCode, _ctx.hook32.codeSize + _ctx.hook32.jmp_size, _ctx.hook32.original_code );
+
+    DWORD flOld = 0;
+    mem.Protect( address, sizeof( _ctx.hook32.jmp_code ), PAGE_EXECUTE_READWRITE, &flOld );
+    status = mem.Write( address, _ctx.hook32.jmp_code );
+    mem.Protect( address, sizeof( _ctx.hook32.jmp_code ), flOld );
+
+    if (NT_SUCCESS( status ))
+        _hooked = true;
+
+    return status;
+}
+
+NTSTATUS RemoteLocalHook::SetHook64( ptr_t /*address*/, asmjit::Assembler& /*hook*/ )
+{
+    _hook64 = true;
+    return STATUS_NOT_IMPLEMENTED;
+}
+
+NTSTATUS RemoteLocalHook::Restore()
+{
+    if (!_hooked)
+        return STATUS_SUCCESS;
+
+    DWORD flOld = 0;
+    _process.memory().Protect( _address, sizeof( _ctx.hook32.jmp_code ), PAGE_EXECUTE_READWRITE, &flOld );
+    NTSTATUS status = _process.memory().Write( _address, _ctx.hook32.codeSize, _ctx.hook32.original_code );
+    _process.memory().Protect( _address, sizeof( _ctx.hook32.jmp_code ), flOld );
+    
+    if (NT_SUCCESS( status ))
+    {
+        _hookData.Free();
+        _pHookCode = _pThunkCode = 0;
+        _address = 0;
+        _hooked = false;
+    }
+
+    return status;
+}
+
+bool RemoteLocalHook::CopyOldCode( ptr_t address, bool x64 )
+{
+    _process.memory().Read( address, sizeof( _ctx.hook32.original_code ), _ctx.hook32.original_code );
+
+    // Store original bytes
+    uint8_t* src = _ctx.hook32.original_code;
+    uint8_t* old = (uint8_t*)(_hookData.ptr() + _hookData.size() - _process.core().native()->pageSize());
     uint32_t all_len = 0;
     ldasm_data ld = { 0 };
 
     do
     {
-        uint32_t len = ldasm( codePtr, &ld, is_x64 );
+        uint32_t len = ldasm( src, &ld, x64 );
 
         // Determine code end
         if (ld.flags & F_INVALID
-             || (len == 1 && (codePtr[ld.opcd_offset] == 0xCC || codePtr[ld.opcd_offset] == 0xC3))
-             || (len == 3 && codePtr[ld.opcd_offset] == 0xC2)
-             || len + all_len > 128)
+            || (len == 1 && (src[ld.opcd_offset] == 0xCC || src[ld.opcd_offset] == 0xC3))
+            || (len == 3 && src[ld.opcd_offset] == 0xC2)
+            || len + all_len > 128)
         {
             break;
         }
@@ -62,59 +125,49 @@ NTSTATUS RemoteLocalHook::SetHook( ptr_t address, asmjit::Assembler& /*hook*/ )
         // if instruction has relative offset, calculate new offset 
         if (ld.flags & F_RELATIVE)
         {
-#ifdef USE64
-            // exit if jump is greater then 2GB
-            if (_abs64( (uintptr_t)(codePtr + *((int*)(old + ld.opcd_size))) - (uintptr_t)old ) > INT_MAX)
-                break;
+            int32_t diff = 0;
+            const uintptr_t ofst = (ld.disp_offset != 0 ? ld.disp_offset : ld.imm_offset);
+            const uintptr_t sz = ld.disp_size != 0 ? ld.disp_size : ld.imm_size;
+
+            memcpy( &diff, src + ofst, sz );
+
+            if(x64)
+            {
+                // exit if jump is greater then 2GB
+                /*if (_abs64( src + len + diff - old ) > INT_MAX)
+                {
+                    break;
+                }
+                else
+                {
+                    diff += static_cast<int32_t>(src - old);
+                    memcpy( old + ofst, &diff, sz );
+                }*/
+            }
             else
-                *(uint32_t*)(old + ld.opcd_size) += (uint32_t)(codePtr - old);
-#else
-            *(uintptr_t*)(codePtr + ld.opcd_size) += reinterpret_cast<uintptr_t>(codePtr) - static_cast<uintptr_t>(old);
-#endif
+            {
+                //diff += src - old;
+                memcpy( src + ofst, &diff, sz );
+            }
         }
 
-        codePtr += len;
+        src += len;
         old += len;
         all_len += len;
 
-    } while (all_len < 5);
+    } while (all_len < sizeof( _ctx.hook32.jmp_code ));
 
+    // Failed to copy old code, use backup plan
+    if (all_len >= sizeof( _ctx.hook32.jmp_code ))
+    {
+        _ctx.hook32.jmp_size = 5;
+        _ctx.hook32.codeSize = all_len;
+        *src = 0xE9;
+        //*(int32_t*)(src + 1) = (int32_t)address + all_len - (int32_t)old - 5;
+        return true;
+    }
 
-#ifdef USE64
-#else 
-    *codePtr = ctx_t.jmp_code[0] = 0xE9;
-    *(int32_t*)(codePtr + 1) = memBlock.ptr<int32_t>() - static_cast<int32_t>(address)- 5;
-    *(int32_t*)(ctx_t.jmp_code + 1) = memBlock.ptr<int32_t>() + FIELD_OFFSET( HookCtx32, original_code ) - static_cast<int32_t>(address) - 5;
-#endif
-
-    ctx_t.codeSize = all_len;
-    memset( ctx_t.original_code + ctx_t.codeSize, 0x00, sizeof( ctx_t.original_code ) - ctx_t.codeSize );
-
-    memBlock.Write( 0, ctx_t );
-
-    /*DWORD flOld = 0;
-    _process.memory().Protect( address, all_len, PAGE_EXECUTE_READWRITE, &flOld );
-    _process.memory().Write( address, ctx_t.jmp_code );
-    _process.memory().Protect( address, all_len, flOld );*/
-
-    _hooks.emplace( std::make_pair( address, ctx ) );
-    memBlock.Release();
-
-    return STATUS_SUCCESS;
-}
-
-NTSTATUS RemoteLocalHook::Restore( ptr_t address )
-{
-    // No such hook
-    if (_hooks.count( address ) == 0)
-        return STATUS_NOT_FOUND;
-
-    HOOK_CTX_T( ctx_t, _hooks[address] );
-    UNREFERENCED_PARAMETER( ctx_t );
-
-    _hooks.erase( address );
-
-    return STATUS_SUCCESS;
+    return false;
 }
 
 }

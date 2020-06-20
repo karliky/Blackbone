@@ -5,22 +5,16 @@
 
 #include <stdint.h>
 #include <string>
+#include <memory>
 
 namespace blackbone
 {
 
-typedef uint64_t ptr_t;     // Generic pointer in remote process
-typedef ptr_t    module_t;  // Module base pointer
-
-// PEB helper
-template<typename T>
-struct _PEB_T2
-{
-    typedef typename std::conditional<std::is_same<T, DWORD>::value, _PEB32, _PEB64>::type type;
-};
+using ptr_t = uint64_t;     // Generic pointer in remote process
+using module_t = ptr_t;  // Module base pointer
 
 // Type of barrier
-enum WoW64Type
+enum eBarrier
 {
     wow_32_32 = 0,  // Both processes are WoW64 
     wow_64_64,      // Both processes are x64
@@ -30,17 +24,18 @@ enum WoW64Type
 
 struct Wow64Barrier
 {
-    WoW64Type type = wow_32_32;
+    eBarrier type = wow_32_32;
     bool sourceWow64 = false;
     bool targetWow64 = false;
     bool x86OS = false;
+    bool mismatch = false;
 };
 
 // Module type
 enum eModType
 {
-    mt_mod32,       // 64 bit module
-    mt_mod64,       // 32 bit module
+    mt_mod32,       // 32 bit module
+    mt_mod64,       // 64 bit module
     mt_default,     // type is deduced from target process
     mt_unknown      // Failed to detect type
 };
@@ -53,15 +48,25 @@ enum eModSeachType
     PEHeaders,      // Scan for PE headers in memory
 };
 
+// Switch created wow64 thread to long mode
+enum eThreadModeSwitch
+{
+    NoSwitch,       // Never switch
+    ForceSwitch,    // Always switch
+    AutoSwitch      // Switch depending on wow64 barrier
+};
+
 // Module info
 struct ModuleData
 {
-    ptr_t baseAddress;      // Base image address
+    module_t baseAddress;   // Base image address
     std::wstring name;      // File name
     std::wstring fullPath;  // Full file path
-    size_t size;            // Size of image
+    uint32_t size;          // Size of image
     eModType type;          // Module type
+    ptr_t ldrPtr;           // LDR_DATA_TABLE_ENTRY_BASE_T address
     bool manual;            // Image is manually mapped
+
 
     bool operator ==(const ModuleData& other) const
     {
@@ -74,12 +79,6 @@ struct ModuleData
     }
 };
 
-// Wow64 register helper
-union reg64
-{
-    uint32_t dw[2];
-    uint64_t v;
-};
-
+using ModuleDataPtr = std::shared_ptr<const ModuleData>;
 
 }

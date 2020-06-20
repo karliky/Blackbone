@@ -1,5 +1,6 @@
 #include "ProcessMemory.h"
 #include "Process.h"
+#include "../Misc/Trace.hpp"
 
 namespace blackbone
 {
@@ -21,10 +22,11 @@ ProcessMemory::~ProcessMemory()
 /// <param name="size">Block size</param>
 /// <param name="protection">Memory protection</param>
 /// <param name="desired">Desired base address of new block</param>
+/// <param name="own">false if caller will be responsible for block deallocation</param>
 /// <returns>Memory block. If failed - returned block will be invalid</returns>
-MemBlock ProcessMemory::Allocate( size_t size, DWORD protection /*= PAGE_EXECUTE_READWRITE*/, ptr_t desired /*= 0*/ )
+call_result_t<MemBlock> ProcessMemory::Allocate( size_t size, DWORD protection /*= PAGE_EXECUTE_READWRITE*/, ptr_t desired /*= 0*/, bool own /*= true*/ )
 {
-    return MemBlock::Allocate( *this, size, desired, protection );
+    return MemBlock::Allocate( *this, size, desired, protection, own );
 }
 
 /// <summary>
@@ -36,7 +38,15 @@ MemBlock ProcessMemory::Allocate( size_t size, DWORD protection /*= PAGE_EXECUTE
 /// <returns>Status</returns>
 NTSTATUS ProcessMemory::Free( ptr_t pAddr, size_t size /*= 0*/, DWORD freeType /*= MEM_RELEASE*/ )
 {
-    return _core.native()->VirualFreeExT( pAddr, size, freeType );
+#ifdef _DEBUG
+    assert( freeType != MEM_RELEASE || size == 0 );
+    if (freeType == MEM_DECOMMIT) {
+        BLACKBONE_TRACE( L"Free: Decommit at address 0x%p (0x%x bytes)", static_cast<uintptr_t>(pAddr), size );
+    } else {
+        BLACKBONE_TRACE( L"Free: Free at address 0x%p", static_cast<uintptr_t>(pAddr) );
+    }
+#endif
+    return _core.native()->VirtualFreeExT( pAddr, size, freeType );
 }
 
 /// <summary>
@@ -64,7 +74,11 @@ NTSTATUS ProcessMemory::Protect( ptr_t pAddr, size_t size, DWORD flProtect, DWOR
     if (pOld == nullptr)
         pOld = &junk;
 
-    return _core.native()->VirtualProtectExT( pAddr, size, CastProtection( flProtect, _core.DEP() ), pOld );
+    DWORD finalProt = flProtect;
+    if (_casting == MemProtectionCasting::useDep)
+        finalProt = CastProtection( flProtect, _core.DEP() );
+
+    return _core.native()->VirtualProtectExT( pAddr, size, finalProt, pOld );
 }
 
 /// <summary>
@@ -81,11 +95,8 @@ NTSTATUS ProcessMemory::Protect( ptr_t pAddr, size_t size, DWORD flProtect, DWOR
 NTSTATUS ProcessMemory::Read( ptr_t dwAddress, size_t dwSize, PVOID pResult, bool handleHoles /*= false*/ )
 {
     DWORD64 dwRead = 0;
-
     if (dwAddress == 0)
-        return LastNtStatus( STATUS_INVALID_ADDRESS );
-
-    LastNtStatus( STATUS_SUCCESS );
+        return STATUS_INVALID_ADDRESS;
 
     // Simple read
     if (!handleHoles)
@@ -108,17 +119,46 @@ NTSTATUS ProcessMemory::Read( ptr_t dwAddress, size_t dwSize, PVOID pResult, boo
 
             uint64_t region_ptr = memptr - dwAddress;
 
-            if (_core.native()->ReadProcessMemoryT( mbi.BaseAddress,
+            auto status = _core.native()->ReadProcessMemoryT(
+                mbi.BaseAddress,
                 reinterpret_cast<uint8_t*>(pResult) + region_ptr,
                 static_cast<size_t>(mbi.RegionSize),
-                &dwRead ) != STATUS_SUCCESS)
-            {
-                return LastNtStatus();
-            }
+                &dwRead
+            );
+
+            if (!NT_SUCCESS( status ))
+                return status;
         }
     }
 
     return STATUS_SUCCESS;
+}
+
+/// <summary>
+/// Read data
+/// </summary>
+/// <param name="adrList">Base address + list of offsets</param>
+/// <param name="dwSize">Size of data to read</param>
+/// <param name="pResult">Output buffer</param>
+/// <param name="handleHoles">
+/// If true, function will try to read all committed pages in range ignoring uncommitted ones.
+/// Otherwise function will fail if there is at least one non-committed page in region.
+/// </param>
+/// <returns>Status</returns>
+NTSTATUS ProcessMemory::Read( const std::vector<ptr_t>& adrList, size_t dwSize, PVOID pResult, bool handleHoles /*= false */ )
+{
+    if (adrList.empty())
+        return STATUS_INVALID_PARAMETER;
+    if(adrList.size() == 1)
+        return Read( adrList.front(), dwSize, pResult, handleHoles );
+
+    bool wow64 = _process->barrier().targetWow64;
+    ptr_t ptr = wow64 ? Read<uint32_t>( adrList[0] ).result( 0 ) : Read<ptr_t>( adrList[0] ).result( 0 );
+
+    for (size_t i = 1; i < adrList.size() - 1; i++)
+        ptr = wow64 ? Read<uint32_t>( ptr + adrList[i] ).result( 0 ) : Read<ptr_t>( ptr + adrList[i] ).result( 0 );
+
+    return Read( ptr + adrList.back(), dwSize, pResult, handleHoles );
 }
 
 /// <summary>
@@ -134,14 +174,36 @@ NTSTATUS ProcessMemory::Write( ptr_t pAddress, size_t dwSize, const void* pData 
 }
 
 /// <summary>
+/// Write data
+/// </summary>
+/// <param name="adrList">Base address + list of offsets</param>
+/// <param name="dwSize">Size of data to write</param>
+/// <param name="pData">Buffer to write</param>
+/// <returns>Status</returns>
+NTSTATUS ProcessMemory::Write( const std::vector<ptr_t>& adrList, size_t dwSize, const void* pData )
+{
+    if (adrList.empty())
+        return STATUS_INVALID_PARAMETER;
+    if (adrList.size() == 1)
+        return Write( adrList.front(), dwSize, pData );
+
+    bool wow64 = _process->barrier().targetWow64;
+    ptr_t ptr = wow64 ? Read<uint32_t>( adrList[0] ).result( 0 ) : Read<ptr_t>( adrList[0] ).result( 0 );
+
+    for (size_t i = 1; i < adrList.size() - 1; i++)
+        ptr = wow64 ? Read<uint32_t>( ptr + adrList[i] ).result( 0 ) : Read<ptr_t>( ptr + adrList[i] ).result( 0 );
+
+    return Write( ptr + adrList.back(), dwSize, pData );
+}
+
+/// <summary>
 /// Enumerate valid memory regions
 /// </summary>
-/// <param name="results">Found regions</param>
 /// <param name="includeFree">If true - non-allocated regions will be included in list</param>
-/// <returns>Number of regions found</returns>
-size_t ProcessMemory::EnumRegions( std::list<MEMORY_BASIC_INFORMATION64>& results, bool includeFree /*= false*/ )
+/// <returns>Found regions</returns>
+std::vector<MEMORY_BASIC_INFORMATION64> ProcessMemory::EnumRegions( bool includeFree /*= false*/ )
 {
-    return _core.native()->EnumRegions( results, includeFree );
+    return _core.native()->EnumRegions( includeFree );
 }
 
 }

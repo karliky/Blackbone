@@ -4,83 +4,71 @@
 
 namespace blackbone
 {
-#pragma warning(disable : 4201)
 
-    typedef struct _RTL_RB_TREE
-    {
-        struct _RTL_BALANCED_NODE * Root;
-        struct _RTL_BALANCED_NODE * Min;
-    } RTL_RB_TREE, *PRTL_RB_TREE;
+template<typename T>
+struct _RTL_RB_TREE
+{
+    T Root;
+    T Min;
+};
 
-    typedef struct _RTL_BALANCED_NODE
-    {
-        union
-        {
-            struct _RTL_BALANCED_NODE * Children[2];
-            struct
-            {
-                struct _RTL_BALANCED_NODE * Left;
-                struct _RTL_BALANCED_NODE * Right;
-            };
-        };
-        union
-        {
-            union
-            {
-                struct
-                {
-                    unsigned char Red : 1;
-                };
-                struct
-                {
-                    unsigned char Balance : 2;
-                };
-            };
+template<typename T>
+struct _RTL_BALANCED_NODE
+{
+    T Left;
+    T Right;
+    T ParentValue;
+};
 
-            size_t ParentValue;
-        };
-    } RTL_BALANCED_NODE, *PRTL_BALANCED_NODE;
+template<typename T>
+struct _LDR_DDAG_NODE
+{
+    _LIST_ENTRY_T<T> Modules;
+    T ServiceTagList;
+    uint32_t LoadCount;
+    uint32_t ReferenceCount;
+    uint32_t DependencyCount;
+    T RemovalLink;
+    T IncomingDependencies;
+    _LDR_DDAG_STATE State;
+    T CondenseLink;
+    uint32_t PreorderNumber;
+    uint32_t LowestLink;
+};
 
-    struct _LDR_DDAG_NODE
-    {
-        _LIST_ENTRY Modules;
-        struct _LDR_SERVICE_TAG_RECORD * ServiceTagList;
-        unsigned long LoadCount;
-        unsigned long ReferenceCount;
-        unsigned long DependencyCount;
-        _SINGLE_LIST_ENTRY RemovalLink;
-        void* IncomingDependencies;
-        _LDR_DDAG_STATE State;
-        struct _SINGLE_LIST_ENTRY CondenseLink;
-        unsigned long PreorderNumber;
-        unsigned long LowestLink;
-    };
+template<typename T>
+struct _LDR_DATA_TABLE_ENTRY_W8 : _LDR_DATA_TABLE_ENTRY_BASE_T<T>
+{
+    T DdagNode;                                     // _LDR_DDAG_NODE*
+    _LIST_ENTRY_T<T> NodeModuleLink;
+    T SnapContext;
+    T ParentDllBase;
+    T SwitchBackContext;
+    _RTL_BALANCED_NODE<T> BaseAddressIndexNode;
+    _RTL_BALANCED_NODE<T> MappingInfoIndexNode;
+    T OriginalBase;
+    LARGE_INTEGER LoadTime;
+    uint32_t BaseNameHashValue;
+    _LDR_DLL_LOAD_REASON LoadReason;
+    uint32_t ImplicitPathOptions;
+};
 
-    struct _LDR_DATA_TABLE_ENTRY_W8 : LDR_DATA_TABLE_ENTRY_BASE_T
-    {
-        _LDR_DDAG_NODE * DdagNode;
-        _LIST_ENTRY NodeModuleLink;
-        struct _LDRP_DLL_SNAP_CONTEXT * SnapContext;
-        void * ParentDllBase;
-        void * SwitchBackContext;
-        _RTL_BALANCED_NODE BaseAddressIndexNode;
-        _RTL_BALANCED_NODE MappingInfoIndexNode;
-        void * OriginalBase;
-        _LARGE_INTEGER LoadTime;
-        unsigned long BaseNameHashValue;
-        _LDR_DLL_LOAD_REASON LoadReason;
-        unsigned long ImplicitPathOptions;
-    };
+template<typename T>
+struct _RTL_INVERTED_FUNCTION_TABLE8
+{
+    ULONG Count;
+    ULONG MaxCount;
+    ULONG Epoch;
+    UCHAR Overflow;
+    _RTL_INVERTED_FUNCTION_TABLE_ENTRY<T> Entries[0x200];
+};
 
-    typedef struct _RTL_INVERTED_FUNCTION_TABLE8
-    {
-        ULONG Count;
-        ULONG MaxCount;
-        ULONG Epoch;
-        UCHAR Overflow;
-        RTL_INVERTED_FUNCTION_TABLE_ENTRY Entries[0x200];
+using _LDR_DATA_TABLE_ENTRY_W832 = _LDR_DATA_TABLE_ENTRY_W8<uint32_t>;
+using _LDR_DATA_TABLE_ENTRY_W864 = _LDR_DATA_TABLE_ENTRY_W8<uint64_t>;
+using LDR_DATA_TABLE_ENTRY_W8T = _LDR_DATA_TABLE_ENTRY_W8<uintptr_t>;
 
-    } RTL_INVERTED_FUNCTION_TABLE8, *PRTL_INVERTED_FUNCTION_TABLE8;
+using _LDR_DDAG_NODE_32 = _LDR_DDAG_NODE<uint32_t>;
+using _LDR_DDAG_NODE_64 = _LDR_DDAG_NODE<uint64_t>;
+using LDR_DDAG_NODE_T = _LDR_DDAG_NODE<uintptr_t>;
 
-#pragma warning(default : 4201)
 }

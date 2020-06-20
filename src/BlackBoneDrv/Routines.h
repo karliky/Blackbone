@@ -81,6 +81,14 @@ NTSTATUS BBProtectMemory( IN PPROTECT_MEMORY pProtect );
 NTSTATUS BBHideVAD( IN PHIDE_VAD pData );
 
 /// <summary>
+/// Enumerate committed, accessible, non-guarded memory regions
+/// </summary>
+/// <param name="pData">Target process ID</param>
+/// <param name="pResult">Result</param>
+/// <returns>Status code</returns>
+NTSTATUS BBEnumMemRegions( IN PENUM_REGIONS pData, OUT PENUM_REGIONS_RESULT pResult );
+
+/// <summary>
 /// Inject dll into process
 /// </summary>
 /// <param name="pid">Target PID</param>
@@ -94,6 +102,25 @@ NTSTATUS BBInjectDll( IN PINJECT_DLL pData );
 /// <param name="pAccess">Request params</param>
 /// <returns>Status code</returns>
 NTSTATUS BBUnlinkHandleTable( IN PUNLINK_HTABLE pUnlink );
+
+/// <summary>
+/// Hook SSDT entry
+/// </summary>
+/// <param name="index">SSDT index to hook</param>
+/// <param name="newAddr">Hook function</param>
+/// <param name="ppOldAddr">Original function pointer</param>
+/// <returns>Status code</returns>
+NTSTATUS BBHookSSDT( IN ULONG index, IN PVOID newAddr, OUT PVOID *ppOldAddr );
+
+/// <summary>
+/// Restore SSDT hook
+/// </summary>
+/// <param name="index">SSDT index to restore</param>
+/// <param name="origAddr">Original function address</param>
+/// <returns>Status code</returns>
+NTSTATUS BBRestoreSSDT( IN ULONG index, IN PVOID origAddr );
+
+NTSTATUS BBHookInline( IN PVOID origAddr, IN PVOID newAddr );
 
 /// <summary>
 /// Process termination handler

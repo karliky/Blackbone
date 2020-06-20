@@ -27,9 +27,6 @@ ENUM_OPS(CreateThreadFlags)
 class Native
 {
 public:
-    typedef std::list<ModuleData> listModules;
-
-public:
     BLACKBONE_API Native( HANDLE hProcess, bool x86OS = false );
     BLACKBONE_API ~Native();
 
@@ -43,7 +40,7 @@ public:
     /// <param name="flAllocationType">Allocation type</param>
     /// <param name="flProtect">Memory protection</param>
     /// <returns>Status code</returns>
-    virtual NTSTATUS VirualAllocExT( ptr_t& lpAddress, size_t dwSize, DWORD flAllocationType, DWORD flProtect );
+    virtual NTSTATUS VirtualAllocExT( ptr_t& lpAddress, size_t dwSize, DWORD flAllocationType, DWORD flProtect );
 
     /// <summary>
     /// Free virtual memory
@@ -52,7 +49,7 @@ public:
     /// <param name="dwSize">Region size</param>
     /// <param name="dwFreeType">Memory release type.</param>
     /// <returns>Status code</returns>
-    virtual NTSTATUS VirualFreeExT( ptr_t lpAddress, size_t dwSize, DWORD dwFreeType );
+    virtual NTSTATUS VirtualFreeExT( ptr_t lpAddress, size_t dwSize, DWORD dwFreeType );
 
     /// <summary>
     /// Change memory protection
@@ -162,6 +159,15 @@ public:
     virtual NTSTATUS SetThreadContextT( HANDLE hThread, _CONTEXT32& ctx );
 
     /// <summary>
+    /// NtQueueApcThread
+    /// </summary>
+    /// <param name="hThread">Thread handle.</param>
+    /// <param name="func">APC function</param>
+    /// <param name="arg">APC argument</param>
+    /// <returns>Status code</returns>
+    virtual NTSTATUS QueueApcT( HANDLE hThread, ptr_t func, ptr_t arg );
+
+    /// <summary>
     /// Get WOW64 PEB
     /// </summary>
     /// <param name="ppeb">Retrieved PEB</param>
@@ -192,10 +198,9 @@ public:
     /// <summary>
     /// Enumerate valid memory regions
     /// </summary>
-    /// <param name="results">Found regions</param>
     /// <param name="includeFree">If true - non-allocated regions will be included in list</param>
-    /// <returns>Number of regions found</returns>
-    BLACKBONE_API size_t EnumRegions( std::list<MEMORY_BASIC_INFORMATION64>& results, bool includeFree = false );
+    /// <returns>Found regions</returns>>
+    BLACKBONE_API std::vector<MEMORY_BASIC_INFORMATION64> EnumRegions( bool includeFree = false );
 
     /// <summary>
     /// Enumerate process modules
@@ -203,7 +208,7 @@ public:
     /// <param name="result">Found modules</param>
     /// <param name="mtype">Module type: x86 or x64</param>
     /// <returns>Module count</returns>
-    BLACKBONE_API size_t EnumModules( listModules& result, eModSeachType search = LdrList, eModType mtype = mt_default );
+    BLACKBONE_API std::vector<ModuleDataPtr> EnumModules( eModSeachType search = LdrList, eModType mtype = mt_default );
 
     /// <summary>
     /// Get lowest possible valid address value
@@ -216,6 +221,12 @@ public:
     /// </summary>
     /// <returns>Address value</returns>
     BLACKBONE_API inline ptr_t maxAddr() const { return 0x7FFFFFFEFFFF; }
+    
+    /// <summary>
+    /// Get highest possible valid address value
+    /// </summary>
+    /// <returns>Address value</returns>
+    BLACKBONE_API inline ptr_t maxAddr32() const { return 0x7FFFFFFF; }
                                                                         
     /// <summary>
     /// Get page size
@@ -230,21 +241,21 @@ private:
     /// <param name="result">Found modules</param>
     /// <returns>Module count</returns>
     template<typename T>
-    size_t EnumModulesT( Native::listModules& result );
+    std::vector<ModuleDataPtr> EnumModulesT();
 
     /// <summary>
     /// Enum process section objects
     /// </summary>
     /// <param name="result">Found modules</param>
     /// <returns>Sections count</returns>
-    size_t EnumSections( listModules& result );
+    std::vector<ModuleDataPtr> EnumSections();
 
     /// <summary>
     /// Enum pages containing valid PE headers
     /// </summary>
     /// <param name="result">Found modules</param>
     /// <returns>Sections count</returns>
-    size_t EnumPEHeaders( listModules& result );
+    std::vector<ModuleDataPtr> EnumPEHeaders();
 
 protected:
     HANDLE _hProcess;           // Process handle

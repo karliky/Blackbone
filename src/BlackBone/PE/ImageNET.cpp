@@ -3,8 +3,8 @@
 
 #ifdef COMPILER_MSVC
 
-#include <mscoree.h>
-#include <metahost.h>
+#include "mscoree.h"
+#include "metahost.h"
 
 #include <vector>
 
@@ -33,35 +33,47 @@ bool ImageNET::Init( const std::wstring& path )
 
     _path = path;
 
-    if (FAILED( CoInitialize( 0 ) ))
-         return false;
-
-    hr = CoCreateInstance( CLSID_CorMetaDataDispenser, NULL, CLSCTX_INPROC_SERVER, 
-                           IID_IMetaDataDispenserEx, reinterpret_cast<void**>(&_pMetaDisp) );
-    if (FAILED( hr ))
-        return false;
-
-    //
-    // query required interfaces
-    //
-    hr = _pMetaDisp->OpenScope( _path.c_str(), 0, IID_IMetaDataImport, reinterpret_cast<IUnknown**>(&_pMetaImport) );
-    if (hr == CLDB_E_BADUPDATEMODE)
+    if(!_pMetaDisp)
     {
-        V_VT(&value)  = VT_UI4;
-        V_UI4(&value) = MDUpdateIncremental;
-
-        if (FAILED( hr = _pMetaDisp->SetOption( MetaDataSetUpdate, &value ) ))
+        if (FAILED( CoInitialize( 0 ) ))
             return false;
 
-        hr = _pMetaDisp->OpenScope( _path.c_str(), 0, IID_IMetaDataImport, reinterpret_cast<IUnknown**>(&_pMetaImport) );
+        hr = CoCreateInstance(
+            CLSID_CorMetaDataDispenser, NULL, CLSCTX_INPROC_SERVER,
+            IID_IMetaDataDispenserEx, reinterpret_cast<void**>(&_pMetaDisp)
+            );
+
+        if (FAILED( hr ))
+            return false;
     }
 
-    if (FAILED( hr ))
-        return false;
+    //
+    // Query required interfaces
+    //
+    if(!_pMetaImport)
+    {
+        hr = _pMetaDisp->OpenScope( _path.c_str(), 0, IID_IMetaDataImport, reinterpret_cast<IUnknown**>(&_pMetaImport) );
+        if (hr == CLDB_E_BADUPDATEMODE)
+        {
+            V_VT( &value ) = VT_UI4;
+            V_UI4( &value ) = MDUpdateIncremental;
 
-    hr = _pMetaImport->QueryInterface( IID_IMetaDataAssemblyImport, reinterpret_cast<void**>(&_pAssemblyImport) );
-    if (FAILED( hr ))
-        return false;
+            if (FAILED( hr = _pMetaDisp->SetOption( MetaDataSetUpdate, &value ) ))
+                return false;
+
+            hr = _pMetaDisp->OpenScope( _path.c_str(), 0, IID_IMetaDataImport, reinterpret_cast<IUnknown**>(&_pMetaImport) );
+        }
+
+        if (FAILED( hr ))
+            return false;
+    }
+
+    if(!_pAssemblyImport)
+    {
+        hr = _pMetaImport->QueryInterface( IID_IMetaDataAssemblyImport, reinterpret_cast<void**>(&_pAssemblyImport) );
+        if (FAILED( hr ))
+            return false;
+    }
 
     return true;
 }
@@ -71,7 +83,7 @@ bool ImageNET::Init( const std::wstring& path )
 /// </summary>
 /// <param name="methods">Found Methods</param>
 /// <returns>true on success</returns>
-bool ImageNET::Parse( mapMethodRVA& methods )
+bool ImageNET::Parse( mapMethodRVA* methods /*= nullptr*/ )
 {
     DWORD dwcTypeDefs, dwTypeDefFlags, dwcTokens, dwSigBlobSize;
 
@@ -82,13 +94,13 @@ bool ImageNET::Parse( mapMethodRVA& methods )
     WCHAR     wcName[1024]   = { 0 };
     mdToken   rTokens[10]    = { 0 };
 
-    while (SUCCEEDED( _pMetaImport->EnumTypeDefs( &hceTypeDefs, rTypeDefs, ARRAYSIZE( rTypeDefs ), &dwcTypeDefs ))
-            && dwcTypeDefs > 0)
+    while (SUCCEEDED( _pMetaImport->EnumTypeDefs( &hceTypeDefs, rTypeDefs, ARRAYSIZE( rTypeDefs ), &dwcTypeDefs ) )
+        && dwcTypeDefs > 0)
     {
         for (UINT i = 0; i < dwcTypeDefs; i++)
         {
             HRESULT hr = _pMetaImport->GetTypeDefProps( rTypeDefs[i], wcName, ARRAYSIZE( wcName ), NULL, &dwTypeDefFlags, &tExtends );
-            if ( FAILED(hr) )
+            if (FAILED( hr ))
                 continue;
 
             while (SUCCEEDED( _pMetaImport->EnumMethods( &hceMethods, rTypeDefs[i], rTokens, ARRAYSIZE( rTokens ), &dwcTokens ) )
@@ -101,11 +113,12 @@ bool ImageNET::Parse( mapMethodRVA& methods )
                 for (UINT j = 0; j < dwcTokens; j++)
                 {
                     // get method information
-                    HRESULT hr = _pMetaImport->GetMemberProps(
-                        rTokens[j], NULL, wmName, 
+                    hr = _pMetaImport->GetMemberProps(
+                        rTokens[j], NULL, wmName,
                         ARRAYSIZE( wmName ), NULL,
                         &dwAttr, &pbySigBlob, &dwSigBlobSize,
-                        &dwCodeRVA, NULL, NULL, NULL, NULL );
+                        &dwCodeRVA, NULL, NULL, NULL, NULL 
+                        );
 
                     if (FAILED( hr ))
                         continue;
@@ -116,13 +129,14 @@ bool ImageNET::Parse( mapMethodRVA& methods )
         }
     }
 
-    methods = _methods;
+    if(methods)
+        *methods = _methods;
 
     return true;
 }
 
-typedef decltype(&GetRequestedRuntimeVersion) fnGetRequestedRuntimeVersion;
-typedef decltype(&CLRCreateInstance) fnCLRCreateInstancen;
+using fnGetRequestedRuntimeVersion = decltype(&GetRequestedRuntimeVersion);
+using fnCLRCreateInstancen = decltype(&CLRCreateInstance);
 
 /// <summary>
 /// Get image .NET runtime version

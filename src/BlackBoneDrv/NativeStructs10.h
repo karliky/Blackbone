@@ -127,6 +127,7 @@ typedef struct _MMVAD // Size=128
 {
     struct _MMVAD_SHORT Core; // Size=64 Offset=0
     union ___unnamed2047 u2; // Size=4 Offset=64
+    unsigned long pad0;  // Size=4 Offset=68
     struct _SUBSECTION * Subsection; // Size=8 Offset=72
     struct _MMPTE * FirstPrototypePte; // Size=8 Offset=80
     struct _MMPTE * LastContiguousPte; // Size=8 Offset=88
@@ -135,34 +136,6 @@ typedef struct _MMVAD // Size=128
     union ___unnamed2048 u4; // Size=8 Offset=120
     struct _FILE_OBJECT * FileObject; // Size=8 Offset=128
 } MMVAD, *PMMVAD;
-
-typedef struct _POOL_HEADER // Size=16
-{
-    union
-    {
-        struct
-        {
-            unsigned short PreviousSize : 8; // Size=2 Offset=0 BitOffset=0 BitCount=8
-            unsigned short PoolIndex : 8; // Size=2 Offset=0 BitOffset=8 BitCount=8
-        };
-        unsigned long Ulong1; // Size=4 Offset=0
-    };
-    struct
-    {
-        unsigned short BlockSize : 8; // Size=2 Offset=2 BitOffset=0 BitCount=8
-        unsigned short PoolType : 8; // Size=2 Offset=2 BitOffset=8 BitCount=8
-    };
-    unsigned long PoolTag; // Size=4 Offset=4
-    union
-    {
-        struct _EPROCESS * ProcessBilled; // Size=8 Offset=8
-        struct
-        {
-            unsigned short AllocatorBackTraceIndex; // Size=2 Offset=8
-            unsigned short PoolTagHash; // Size=2 Offset=10
-        };
-    };
-} POOL_HEADER, *PPOOL_HEADER;
 #pragma pack(pop)
 
 typedef struct _HANDLE_TABLE
@@ -170,6 +143,12 @@ typedef struct _HANDLE_TABLE
     ULONG NextHandleNeedingPool;
     long ExtraInfoPages;
     LONG_PTR TableCode;
+    PEPROCESS QuotaProcess;
+    LIST_ENTRY HandleTableList;
+    ULONG UniqueProcessId;
+    ULONG Flags;
+    EX_PUSH_LOCK HandleContentionEvent;
+    EX_PUSH_LOCK HandleTableLock;
     // More fields here...
 } HANDLE_TABLE, *PHANDLE_TABLE;
 

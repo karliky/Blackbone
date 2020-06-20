@@ -1,12 +1,12 @@
 #include "NtLoader.h"
 #include "../../Process/Process.h"
-#include "../../Patterns/PatternSearch.h"
-#include "../../Misc/Utils.h"
 #include "../../Include/Macro.h"
+#include "../../Misc/Utils.h"
 #include "../../Misc/DynImport.h"
 #include "../../Misc/trace.hpp"
+#include "../../Symbols/SymbolData.h"
 
-#include "../contrib/VersionHelpers.h"
+#include <3rd_party/VersionApi.h>
 
 namespace blackbone
 {
@@ -14,32 +14,52 @@ namespace blackbone
 NtLdr::NtLdr( Process& proc )
     : _process( proc )
 {
-    HMODULE hNtdll = GetModuleHandleW( L"ntdll.dll" );
-
-    DynImport::load( "RtlInitUnicodeString",   hNtdll );
-    DynImport::load( "RtlHashUnicodeString",   hNtdll );
-    DynImport::load( "RtlUpcaseUnicodeChar",   hNtdll );
-    DynImport::load( "RtlEncodeSystemPointer", hNtdll );
-}
-
-NtLdr::~NtLdr(void)
-{
 }
 
 /// <summary>
 /// Initialize some loader stuff
 /// </summary>
-/// <returns></returns>
-bool NtLdr::Init()
+/// <param name="initFor">Target module type</param>
+/// <returns>true on success</returns
+bool NtLdr::Init( eModType initFor /*= mt_default*/ )
 {
-    FindLdrpHashTable();
-    if (IsWindows8OrGreater())
-        FindLdrpModuleIndexBase();
+    // Sanity check, already initialized
+    assert( initFor != _initializedFor );
+    if (initFor == _initializedFor)
+        return true;
 
-    ScanPatterns();
-    FindLdrHeap();
+    // Detect target module type
+    _initializedFor = initFor;
+    if (_initializedFor == mt_unknown)
+        _initializedFor = _process.core().isWow64() ? mt_mod32 : mt_mod64;
+
+    // Select loader version
+    if (_initializedFor == mt_mod32)
+    {
+        FindLdrHeap<uint32_t>();
+        FindLdrpHashTable<uint32_t>();
+        if (IsWindows8OrGreater())
+            FindLdrpModuleIndexBase<uint32_t>();
+    }
+    else
+    {
+        FindLdrHeap<uint64_t>();
+        FindLdrpHashTable<uint64_t>();
+        if (IsWindows8OrGreater())
+            FindLdrpModuleIndexBase<uint64_t>();
+    }
 
     _nodeMap.clear();
+
+    // Report errors
+#ifndef BLACKBONE_NO_TRACE
+    if (_LdrHeapBase == 0)
+        BLACKBONE_TRACE( "NativeLdr: LdrHeapBase not found" );
+    if (_LdrpHashTable == 0)
+        BLACKBONE_TRACE( "NativeLdr: LdrpHashTable not found" );
+    if (IsWindows8OrGreater() && _LdrpModuleIndexBase == 0)
+        BLACKBONE_TRACE( "NativeLdr: LdrpModuleIndexBase not found" );
+#endif
 
     return true;
 }
@@ -48,64 +68,56 @@ bool NtLdr::Init()
 /// Add module to some loader structures 
 /// (LdrpHashTable, LdrpModuleIndex( win8+ only ), InMemoryOrderModuleList( win7 only ))
 /// </summary>
-/// <param name="hMod">Module base address</param>
-/// <param name="ImageSize">Size of image</param>
-/// <param name="DllBasePath">Full-qualified image path</param>
-/// <param name="entryPoint">Entry point RVA</param>
-/// <param name="flags">Type of references to create</param>
+/// <param name="mod">Module data</param>
 /// <returns>true on success</returns>
-bool NtLdr::CreateNTReference(
-    HMODULE hMod,
-    size_t ImageSize,
-    const std::wstring& DllBasePath,
-    size_t entryPoint,
-    LdrRefFlags flags /*= Ldr_All*/
-    )
+bool NtLdr::CreateNTReference( NtLdrEntry& mod )
 {
     // Skip
-    if (flags == Ldr_None)
+    if (mod.flags == Ldr_None)
         return true;
 
+    // Check if reinitialization is required
+    if (_initializedFor != mod.type)
+        Init( mod.type );
+
+    bool x64Image = (mod.type == mt_mod64);
+    bool w8 = IsWindows8OrGreater();
+
     // Win 8 and higher
-    if (IsWindows8OrGreater())
-    {
-        ULONG hash = 0;
-        _LDR_DATA_TABLE_ENTRY_W8 *pEntry = InitW8Node( reinterpret_cast<void*>(hMod), ImageSize, DllBasePath, entryPoint, hash );
-        _nodeMap.emplace( std::make_pair( hMod, pEntry ) );
-
-        // Insert into LdrpHashTable
-        if (flags & Ldr_HashTable)
-            InsertHashNode( GET_FIELD_PTR( pEntry, HashLinks ), hash );
-
-        // Insert into module graph
-        if (flags & Ldr_ModList)
-            InsertTreeNode( pEntry, reinterpret_cast<size_t>(hMod) );
-
-        if (flags & Ldr_ThdCall)
-        {
-            _process.memory().Write( GET_FIELD_PTR( pEntry, Flags ), 0x80004 );
-            InsertMemModuleNode( 0, GET_FIELD_PTR( pEntry, InLoadOrderLinks ), 
-                                 GET_FIELD_PTR( pEntry, InInitializationOrderLinks ) );
-        }
-    }
+    if (w8)
+        mod.ldrPtr = CALL_64_86( x64Image, InitW8Node, mod );
     // Windows 7 and earlier
     else
+        mod.ldrPtr = CALL_64_86( x64Image, InitW7Node, mod );
+
+    if (mod.ldrPtr == 0)
+        return false;
+
+    _nodeMap.emplace( mod.baseAddress, mod.ldrPtr );
+
+    // Insert into module graph
+    if (mod.flags & Ldr_ModList && w8)
+        CALL_64_86( x64Image, InsertTreeNode, mod.ldrPtr, mod );
+
+    // Insert into LdrpHashTable
+    if (mod.flags & Ldr_HashTable)
     {
-        ULONG hash = 0;
-        _LDR_DATA_TABLE_ENTRY_W7 *pEntry = InitW7Node( reinterpret_cast<void*>(hMod), ImageSize, DllBasePath, entryPoint, hash );
-        _nodeMap.emplace( std::make_pair( hMod, pEntry ) );
+        auto ptr = FIELD_PTR_64_86( x64Image, mod.ldrPtr, _LDR_DATA_TABLE_ENTRY_BASE_T, HashLinks );
+        CALL_64_86( x64Image, InsertHashNode, ptr, mod.hash );
+    }
 
-        // Insert into LdrpHashTable
-        if (flags & Ldr_HashTable)
-            InsertHashNode( GET_FIELD_PTR( pEntry, HashLinks ), hash );
+    // Insert into ldr lists
+    if (mod.flags & Ldr_ThdCall || (!w8 && mod.flags & Ldr_ModList))
+    {
+        _process.memory().Write( FIELD_PTR_64_86( x64Image, mod.ldrPtr, _LDR_DATA_TABLE_ENTRY_BASE_T, Flags ), 0x80004 );
+        ptr_t loadPtr = 0, initptr = 0;
 
-        // Insert into LDR list
-        if (flags & (Ldr_ModList | Ldr_ThdCall))
-        {
-            _process.memory().Write( GET_FIELD_PTR( pEntry, Flags ), 0x80004 );
-            InsertMemModuleNode( 0, GET_FIELD_PTR( pEntry, InLoadOrderLinks ), 0 );
-        }
-	}
+        loadPtr = FIELD_PTR_64_86( x64Image, mod.ldrPtr, _LDR_DATA_TABLE_ENTRY_BASE_T, InLoadOrderLinks );
+        if(w8)
+            initptr = FIELD_PTR_64_86( x64Image, mod.ldrPtr, _LDR_DATA_TABLE_ENTRY_BASE_T, InInitializationOrderLinks );
+
+        CALL_64_86( x64Image, InsertMemModuleNode, 0, loadPtr, initptr );
+    }
 
     return true;
 }
@@ -116,30 +128,17 @@ bool NtLdr::CreateNTReference(
 /// <param name="ptr">node pointer (if nullptr - new dummy node is allocated)</param>
 /// <param name="pModule">Module base address</param>
 /// <returns>Node address</returns>
-template<typename T> 
-T* NtLdr::SetNode( T* ptr, void* pModule )
+template<typename T, typename Module> 
+ptr_t NtLdr::SetNode( ptr_t ptr, Module pModule )
 {
-    if(ptr == nullptr)
+    if(ptr == 0)
     {
-        /*
-        AsmJitHelper a
+        auto mem = _process.memory().Allocate( sizeof( T ), PAGE_READWRITE, 0, false );
+        if (!mem)
+            return 0;
 
-        a.GenPrologue();
-        a.GenCall(&GetProcessHeap, {  });
-        a.GenCall(&HeapAlloc, { asmjit::host::zax, HEAP_ZERO_MEMORY, sizeof(T) });
-        a->SaveRetValAndSignalEvent();
-        a.GenEpilogue();
-
-        m_memory.ExecInWorkerThread(a->make(), a->getCodeSize(), (size_t&)ptr);*/
-
-        auto rgn = _process.memory().Allocate( sizeof(T), PAGE_READWRITE );
-        if (rgn.valid())
-        {
-            rgn.Release();
-
-            ptr = rgn.ptr<T*>();
-            rgn.Write( FIELD_OFFSET2( T*, DllBase ), pModule );
-        }
+        ptr = mem->ptr();
+        mem->Write( offsetOf( &T::DllBase ), pModule );
     }
 
     return ptr;
@@ -148,439 +147,388 @@ T* NtLdr::SetNode( T* ptr, void* pModule )
 /// <summary>
 /// Create thread static TLS array
 /// </summary>
-/// <param name="pModule">Module base address</param>
-/// <param name="pTls">TLS directory of target image</param>
-/// <returns>true on success</returns>
-bool NtLdr::AddStaticTLSEntry( void* pModule, IMAGE_TLS_DIRECTORY *pTls )
+/// <param name="mod">Module data</param>
+/// <param name="tlsPtr">TLS directory of target image</param>
+/// <returns>Status code</returns>
+NTSTATUS NtLdr::AddStaticTLSEntry( NtLdrEntry& mod, ptr_t tlsPtr )
 {
     bool wxp = IsWindowsXPOrGreater() && !IsWindowsVistaOrGreater();
-
-    void* pNode = _nodeMap.count( reinterpret_cast<HMODULE>(pModule) ) ? 
-        _nodeMap[reinterpret_cast<HMODULE>(pModule)] : nullptr;
+    ptr_t pNode = _nodeMap.count( mod.baseAddress ) ? _nodeMap[mod.baseAddress] : 0;
 
     // Allocate appropriate structure
-    if ((pNode = SetNode( reinterpret_cast<PLDR_DATA_TABLE_ENTRY>(pNode), pModule )) == nullptr)
-        return false;
+    ptr_t LdrpHandleTlsData = 0;
+    if (mod.type == mt_mod64)
+    {
+        LdrpHandleTlsData = g_symbols.LdrpHandleTlsData64;
+        pNode = SetNode<_LDR_DATA_TABLE_ENTRY_BASE64>( pNode, mod.baseAddress );
+    }
+    else
+    {
+        LdrpHandleTlsData = g_symbols.LdrpHandleTlsData32;
+        pNode = SetNode<_LDR_DATA_TABLE_ENTRY_BASE32>( pNode, mod.baseAddress );
+    }
+
+    if (pNode == 0)
+        return STATUS_NO_MEMORY;
+
+    // Update ptr
+    if (mod.ldrPtr == 0)
+        mod.ldrPtr = pNode;
 
     // Manually add TLS table
-    if ((wxp || _process.core().native()->GetWow64Barrier().type == wow_64_32) && pTls != nullptr)
+    if (wxp && tlsPtr != 0)
     {
         ptr_t pTeb = 0;
-        if (wxp)
-            pTeb = _process.remote().getWorker()->teb( static_cast<_TEB32*>(nullptr) );
-        else
-            pTeb = _process.remote().getWorker()->teb( static_cast<_TEB64*>(nullptr) );
+        pTeb = _process.remote().getExecThread()->teb( static_cast<_TEB32*>(nullptr) );
 
-        auto tlsStore = _process.memory().Allocate( 0x1000, PAGE_READWRITE );
-        tlsStore.Release();
+        auto mem = _process.memory().Allocate( 0x1000, PAGE_READWRITE, 0, false );
+        if (!mem)
+            return mem.status;
+
+        auto tlsStore = std::move( mem.result() );
 
         IMAGE_TLS_DIRECTORY remoteTls = { 0 };
-        _process.memory().Read( reinterpret_cast<ptr_t>(pTls), sizeof( remoteTls ), &remoteTls );
+        _process.memory().Read( tlsPtr, sizeof( remoteTls ), &remoteTls );
 
         auto size = remoteTls.EndAddressOfRawData - remoteTls.StartAddressOfRawData;
         std::unique_ptr<uint8_t[]> buf( new uint8_t[size]() );
 
         _process.memory().Read( remoteTls.StartAddressOfRawData, size, buf.get() );
 
-        tlsStore.Write( 0, tlsStore.ptr<size_t>() + 0x800 );
+        tlsStore.Write( 0, tlsStore.ptr<uintptr_t>() + 0x800 );
         tlsStore.Write( 0x800, size, buf.get() );
 
-        if (wxp)
-            _process.memory().Write( pTeb + FIELD_OFFSET( _TEB32, ThreadLocalStoragePointer ), tlsStore.ptr<DWORD32>() );
-        else
-            _process.memory().Write( pTeb + FIELD_OFFSET( _TEB64, ThreadLocalStoragePointer ), tlsStore.ptr<DWORD64>() );
-
-        return true;
+        return _process.memory().Write( fieldPtr( pTeb, &_TEB32::ThreadLocalStoragePointer ), tlsStore.ptr<uint32_t>() );
     }
 
     // Use native method
-    if(_LdrpHandleTlsData)
+    if (LdrpHandleTlsData)
     {
-        AsmJitHelper a;
+        auto a = AsmFactory::GetAssembler( mod.type );
         uint64_t result = 0;
 
-        a.GenPrologue();
-        a.GenCall( _LdrpHandleTlsData, { reinterpret_cast<size_t>(pNode) }, IsWindows8Point1OrGreater() ? cc_thiscall : cc_stdcall );
-        _process.remote().AddReturnWithEvent( a );
-        a.GenEpilogue();
+        a->GenPrologue();
+        a->GenCall( LdrpHandleTlsData, { pNode }, IsWindows8Point1OrGreater() ? cc_thiscall : cc_stdcall );
+        _process.remote().AddReturnWithEvent( *a );
+        a->GenEpilogue();
 
-        _process.remote().ExecInWorkerThread( a->make(), a->getCodeSize(), result );
+        auto status = _process.remote().ExecInWorkerThread( (*a)->make(), (*a)->getCodeSize(), result );
+        if (!NT_SUCCESS( status ))
+            return status;
+
+        return static_cast<NTSTATUS>(result);
     }
-    else 
-        return false;
-
-    return true;
+    else
+        return STATUS_ORDINAL_NOT_FOUND;
 }
+
 
 /// <summary>
 /// Create module record in LdrpInvertedFunctionTable
 /// Used to create fake SAFESEH entries
 /// </summary>
-/// <param name="ModuleBase">Module base address</param>
-/// <param name="ImageSize">Size of image</param>
-/// <param name="safeseh">Is set into true, if image has SAFESEH handlers</param>
+/// <param name="mod">Module data</param>
 /// <returns>true on success</returns>
-bool NtLdr::InsertInvertedFunctionTable( void* ModuleBase, size_t ImageSize, bool& safeseh )
+bool NtLdr::InsertInvertedFunctionTable( NtLdrEntry& mod )
 { 
-    RTL_INVERTED_FUNCTION_TABLE7 table = { 0 };
-    PRTL_INVERTED_FUNCTION_TABLE_ENTRY Entries = nullptr;
-    
-    AsmJitHelper a;
-    uint64_t result = 0;
-    auto& memory = _process.memory();
-
-    // Invalid addresses. Probably pattern scan has failed
-    if (_RtlInsertInvertedFunctionTable == 0 || _LdrpInvertedFunctionTable == 0)
-        return false;
-    
-    if (IsWindows8OrGreater())
-        Entries = reinterpret_cast<decltype(Entries)>(GET_FIELD_PTR( reinterpret_cast<PRTL_INVERTED_FUNCTION_TABLE8>(&table), Entries ));
-    else
-        Entries = reinterpret_cast<decltype(Entries)>(GET_FIELD_PTR( &table, Entries ));
-
-    //
-    // Try to find module address in table. 
-    // If found - no additional work is required.
-    //
-    memory.Read( _LdrpInvertedFunctionTable, sizeof( table ), &table );
-    for (DWORD i = 0; i < table.Count; i++)
-        if(Entries[i].ImageBase == ModuleBase)
-            return true;
-
-    a.GenPrologue();
-
-    if (IsWindows8Point1OrGreater())
-        a.GenCall( _RtlInsertInvertedFunctionTable, { reinterpret_cast<size_t>(ModuleBase), ImageSize }, cc_fastcall );
-    else if (IsWindows8OrGreater())
-        a.GenCall( _RtlInsertInvertedFunctionTable, { reinterpret_cast<size_t>(ModuleBase), ImageSize } );
-    else
-        a.GenCall( _RtlInsertInvertedFunctionTable, { _LdrpInvertedFunctionTable, reinterpret_cast<size_t>(ModuleBase), ImageSize } );
-
-    _process.remote().AddReturnWithEvent( a );
-    a.GenEpilogue();
-
-    _process.remote().ExecInWorkerThread( a->make(), a->getCodeSize(), result );
-    memory.Read( _LdrpInvertedFunctionTable, sizeof( table ), &table );
-
-    for(DWORD i = 0; i < table.Count; i++)
+    ptr_t RtlInsertInvertedFunctionTable = g_symbols.RtlInsertInvertedFunctionTable64;
+    ptr_t LdrpInvertedFunctionTable = g_symbols.LdrpInvertedFunctionTable64;
+    if (mod.type == mt_mod32)
     {
-        if(Entries[i].ImageBase != ModuleBase)
-            continue;
-     
-        // If Image has SAFESEH, RtlInsertInvertedFunctionTable is enough
-        if (Entries[i].SizeOfTable != 0)
-            return safeseh = true;
-
-        //
-        // Create fake Exception directory
-        // Directory will be filled later, during exception handling
-        //
-        PIMAGE_RUNTIME_FUNCTION_ENTRY pImgEntry = nullptr;
-
-        // Allocate memory for 512 possible handlers
-        auto block = memory.Allocate( sizeof( DWORD ) * 0x200, PAGE_READWRITE );
-        block.Release();
-        pImgEntry = block.ptr<decltype(pImgEntry)>();
-
-        auto pEncoded = EncodeSystemPointer( pImgEntry );
-
-        // m_LdrpInvertedFunctionTable->Entries[i].ExceptionDirectory
-        size_t field_ofst = reinterpret_cast<size_t>(&Entries[i].ExceptionDirectory)
-            - reinterpret_cast<size_t>(&table);
-
-        // In Win10 _LdrpInvertedFunctionTable is located in mrdata section
-        // mrdata is read-only by default 
-        // LdrProtectMrdata is used to make it writable when needed
-        DWORD flOld = 0;
-        memory.Protect( _LdrpInvertedFunctionTable + field_ofst, sizeof( size_t ), PAGE_EXECUTE_READWRITE, &flOld );
-        auto status = memory.Write( _LdrpInvertedFunctionTable + field_ofst, pEncoded );
-        memory.Protect( _LdrpInvertedFunctionTable + field_ofst, sizeof( size_t ), flOld, &flOld );
-
-        return NT_SUCCESS( status );
+        RtlInsertInvertedFunctionTable = g_symbols.RtlInsertInvertedFunctionTable32;
+        LdrpInvertedFunctionTable = g_symbols.LdrpInvertedFunctionTable32;
     }
 
-    return false;
+    // Invalid addresses. Probably pattern scan has failed
+    if (RtlInsertInvertedFunctionTable == 0 || LdrpInvertedFunctionTable == 0)
+        return false;
+
+    auto InsertP = [&]( auto table )
+    {
+        uint64_t result = 0;
+        auto a = AsmFactory::GetAssembler( mod.type );
+        auto& memory = _process.memory();
+
+        memory.Read( LdrpInvertedFunctionTable, sizeof( table ), &table );
+        for (ULONG i = 0; i < table.Count; i++)
+            if (table.Entries[i].ImageBase == mod.baseAddress)
+                return true;
+
+        a->GenPrologue();
+
+        if (IsWindows8Point1OrGreater())
+            a->GenCall( RtlInsertInvertedFunctionTable, { mod.baseAddress, mod.size }, cc_fastcall );
+        else if (IsWindows8OrGreater())
+            a->GenCall( RtlInsertInvertedFunctionTable, { mod.baseAddress, mod.size } );
+        else
+            a->GenCall( RtlInsertInvertedFunctionTable, { LdrpInvertedFunctionTable, mod.baseAddress, mod.size } );
+
+        _process.remote().AddReturnWithEvent( *a );
+        a->GenEpilogue();
+
+        _process.remote().ExecInWorkerThread( (*a)->make(), (*a)->getCodeSize(), result );
+        memory.Read( LdrpInvertedFunctionTable, sizeof( table ), &table );
+
+        for (DWORD i = 0; i < table.Count; i++)
+        {
+            if (table.Entries[i].ImageBase != mod.baseAddress)
+                continue;
+
+            // If Image has SAFESEH, RtlInsertInvertedFunctionTable is enough
+            if (table.Entries[i].SizeOfTable != 0)
+                return mod.safeSEH = true;
+
+            //
+            // Create fake Exception directory
+            // Directory will be filled later, during exception handling
+            //
+
+            // Allocate memory for 2048 possible handlers
+            auto mem = memory.Allocate( sizeof( DWORD ) * 0x800, PAGE_READWRITE, 0, false );
+            if (!mem)
+                return false;
+
+            // EncodeSystemPointer( mem->ptr() )
+            uint32_t size = 0;
+            ptr_t pEncoded = 0;
+            auto cookie = *reinterpret_cast<uint32_t*>(0x7FFE0330);
+            if (mod.type == mt_mod64)
+            {
+                size = sizeof( uint64_t );
+                pEncoded = _rotr64( cookie ^ mem->ptr<uint64_t>(), cookie & 0x3F );
+            }
+            else
+            {
+                size = sizeof( uint32_t );
+                pEncoded = _rotr( cookie ^ mem->ptr<uint32_t>(), cookie & 0x1F );
+            }
+
+            // m_LdrpInvertedFunctionTable->Entries[i].ExceptionDirectory
+            uintptr_t field_ofst = reinterpret_cast<ptr_t>(&table.Entries[i].ExceptionDirectory)
+                - reinterpret_cast<ptr_t>(&table);
+
+            // In Win10 LdrpInvertedFunctionTable is located in mrdata section
+            // mrdata is read-only by default 
+            // LdrProtectMrdata is used to make it writable when needed
+            DWORD flOld = 0;
+            memory.Protect( LdrpInvertedFunctionTable + field_ofst, sizeof( ptr_t ), PAGE_EXECUTE_READWRITE, &flOld );
+            auto status = memory.Write( LdrpInvertedFunctionTable + field_ofst, size, &pEncoded );
+            memory.Protect( LdrpInvertedFunctionTable + field_ofst, sizeof( ptr_t ), flOld, &flOld );
+
+            return NT_SUCCESS( status );
+        }
+
+        return false;
+    };
+
+    if (IsWindows8OrGreater())
+    {
+        if(mod.type == mt_mod64)
+            return InsertP( _RTL_INVERTED_FUNCTION_TABLE8<DWORD64>() );
+        else
+            return InsertP( _RTL_INVERTED_FUNCTION_TABLE8<DWORD>() );
+    }
+    else
+    {
+        if (mod.type == mt_mod64)
+            return InsertP( _RTL_INVERTED_FUNCTION_TABLE7<DWORD64>() );
+        else
+            return InsertP( _RTL_INVERTED_FUNCTION_TABLE7<DWORD>() );
+    }
 }
 
 /// <summary>
-/// Initialize OS-specific module entry
+/// Free static TLS
 /// </summary>
-/// <param name="ModuleBase">Module base address.</param>
-/// <param name="ImageSize">Size of image.</param>
-/// <param name="dllpath">Full-qualified image path</param>
-/// <param name="entryPoint">Entry point RVA</param>
-/// <param name="outHash">Iamge name hash</param>
-/// <returns>Pointer to created entry</returns>
-_LDR_DATA_TABLE_ENTRY_W8* NtLdr::InitW8Node(
-    void* ModuleBase,
-    size_t ImageSize,
-    const std::wstring& dllpath,
-    size_t entryPoint,
-    ULONG& outHash
-    )
+/// <param name="mod">Target module</param>
+/// <param name="noThread">Don't create new threads during remote call</param>
+/// <returns>Status code</returns>
+NTSTATUS NtLdr::UnloadTLS( const NtLdrEntry& mod, bool noThread /*= false*/ )
 {
-    std::wstring dllname = Utils::StripPath( dllpath );
-    UNICODE_STRING strLocal = { 0 };
+    // No loader entry to free
+    if (mod.ldrPtr == 0)
+        return STATUS_INVALID_ADDRESS;
+
+    ptr_t LdrpReleaseTlsEntry = g_symbols.LdrpReleaseTlsEntry64;
+    if (mod.type == mt_mod32)
+        LdrpReleaseTlsEntry = g_symbols.LdrpReleaseTlsEntry32;
+
+    // Not available
+    if (LdrpReleaseTlsEntry == 0)
+        return STATUS_ORDINAL_NOT_FOUND;
+
+    auto a = AsmFactory::GetAssembler( mod.type );
     uint64_t result = 0;
 
-    _LDR_DATA_TABLE_ENTRY_W8 *pEntry = nullptr; 
-    _LDR_DDAG_NODE *pDdagNode = nullptr;
+    a->GenPrologue();
+    a->GenCall( LdrpReleaseTlsEntry, { mod.ldrPtr, 0 }, IsWindows8Point1OrGreater() ? cc_fastcall : cc_stdcall );
 
-    
-    AsmJitHelper a;
+    _process.remote().AddReturnWithEvent( *a );
+    a->GenEpilogue();
 
-    // Allocate space for Unicode string
-    auto StringBuf = _process.memory().Allocate( 0x1000, PAGE_READWRITE );
-    StringBuf.Release();
+    _process.remote().CreateRPCEnvironment( noThread ? Worker_UseExisting : Worker_CreateNew, true );
+    _process.remote().ExecInWorkerThread( (*a)->make(), (*a)->getCodeSize(), result );
 
-    eModType mt = _process.core().native()->GetWow64Barrier().sourceWow64 ? mt_mod32 : mt_mod64;
-
-    auto RtlAllocateHeap = _process.modules().GetExport(
-        _process.modules().GetModule( L"ntdll.dll", LdrList, mt ), "RtlAllocateHeap" ).procAddress;
-
-    if (_LdrHeapBase)
-    {
-        //
-        // HeapAlloc(LdrHeap, HEAP_ZERO_MEMORY, sizeof(_LDR_DATA_TABLE_ENTRY_W8));
-        //
-        a.GenPrologue();
-
-        a.GenCall( static_cast<size_t>(RtlAllocateHeap), { _LdrHeapBase, HEAP_ZERO_MEMORY, sizeof( _LDR_DATA_TABLE_ENTRY_W8 ) } );
-        _process.remote().AddReturnWithEvent( a, mt );
-        a.GenEpilogue();
-
-        _process.remote().ExecInWorkerThread( a->make(), a->getCodeSize(), result );
-
-        pEntry = reinterpret_cast<decltype(pEntry)>(result);
-    }
-    else
-    {
-        auto block = _process.memory().Allocate( sizeof( _LDR_DATA_TABLE_ENTRY_W8 ), PAGE_READWRITE );
-        pEntry = block.ptr<_LDR_DATA_TABLE_ENTRY_W8*>();
-        block.Release();
-    }
-
-    if(pEntry)
-    {
-        if (_LdrHeapBase)
-        {
-            a->reset();
-
-            //
-            // HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(_LDR_DDAG_NODE));
-            //
-            a.GenPrologue();
-
-            a.GenCall( static_cast<size_t>(RtlAllocateHeap), { _LdrHeapBase, HEAP_ZERO_MEMORY, sizeof( _LDR_DDAG_NODE ) } );
-
-            _process.remote().AddReturnWithEvent( a, mt );
-            a.GenEpilogue();
-
-            _process.remote().ExecInWorkerThread( a->make(), a->getCodeSize(), result );
-            pDdagNode = reinterpret_cast<decltype(pDdagNode)>(result);
-        }
-        else
-        {
-            auto block = _process.memory().Allocate( sizeof( _LDR_DATA_TABLE_ENTRY_W8 ), PAGE_READWRITE );
-            pDdagNode = block.ptr<_LDR_DDAG_NODE*>();
-            block.Release();
-        }  
-
-        if(pDdagNode)
-        {
-            // pEntry->DllBase = ModuleBase;
-            _process.memory().Write( GET_FIELD_PTR( pEntry, DllBase ), ModuleBase );
-
-            // pEntry->SizeOfImage = ImageSize;
-            _process.memory().Write( GET_FIELD_PTR( pEntry, SizeOfImage ), static_cast<ULONG>(ImageSize) );
-
-            // pEntry->EntryPoint = entryPoint;
-            _process.memory().Write( GET_FIELD_PTR( pEntry, EntryPoint ), entryPoint );
-
-            // Dll name and name hash
-            SAFE_CALL( RtlInitUnicodeString, &strLocal, dllname.c_str() );
-            outHash = HashString( dllname );
-
-            // Write into buffer
-            strLocal.Buffer = StringBuf.ptr<PWSTR>();
-            StringBuf.Write( 0, dllname.length() * sizeof(wchar_t) + 2, dllname.c_str() );
-
-            // pEntry->BaseDllName = strLocal;
-            _process.memory().Write( GET_FIELD_PTR( pEntry, BaseDllName ), strLocal );
-
-            // Dll full path
-            SAFE_CALL( RtlInitUnicodeString, &strLocal, dllpath.c_str() );
-            strLocal.Buffer = reinterpret_cast<PWSTR>(StringBuf.ptr<uint8_t*>( ) + 0x800);
-            StringBuf.Write( 0x800, dllpath.length() * sizeof(wchar_t) + 2, dllpath.c_str() );
-              
-            // pEntry->FullDllName = strLocal;
-            _process.memory().Write( GET_FIELD_PTR( pEntry, FullDllName ), strLocal );
-
-            // pEntry->BaseNameHashValue = hash;
-            _process.memory().Write( GET_FIELD_PTR( pEntry, BaseNameHashValue ), outHash );
-
-            //
-            // Ddag node
-            //
-
-            // pEntry->DdagNode = pDdagNode;
-            _process.memory().Write( GET_FIELD_PTR( pEntry, DdagNode ), pDdagNode );
-
-            // pDdagNode->State = LdrModulesReadyToRun;
-            _process.memory().Write( GET_FIELD_PTR( pDdagNode, State ), LdrModulesReadyToRun );
-
-            // pDdagNode->ReferenceCount = 1;
-            _process.memory().Write( GET_FIELD_PTR( pDdagNode, ReferenceCount ), 1 );
-
-            // pDdagNode->LoadCount = -1;
-            _process.memory().Write( GET_FIELD_PTR( pDdagNode, LoadCount ), -1 );
-
-            return pEntry;
-        }
-
-        return nullptr;
-    }
-
-    return nullptr;
+    return STATUS_SUCCESS;
 }
 
 /// <summary>
 ///  Initialize OS-specific module entry
 /// </summary>
-/// <param name="ModuleBase">Module base address.</param>
-/// <param name="ImageSize">Size of image.</param>
-/// <param name="dllpath">Full-qualified image path</param>
-/// <param name="entryPoint">Entry point RVA</param>
-/// <param name="outHash">Iamge name hash</param>
+/// <param name="mod">Module data</param>
 /// <returns>Pointer to created entry</returns>
-_LDR_DATA_TABLE_ENTRY_W7* NtLdr::InitW7Node(
-    void* ModuleBase,
-    size_t ImageSize,
-    const std::wstring& dllpath,
-    size_t entryPoint,
-    ULONG& outHash 
-    )
+template<typename T>
+ptr_t NtLdr::InitBaseNode( NtLdrEntry& mod )
 {
-    std::wstring dllname = Utils::StripPath( dllpath );
-    UNICODE_STRING strLocal = { 0 };
-    uint64_t result = 0;
-
-    _LDR_DATA_TABLE_ENTRY_W7 *pEntry = nullptr; 
-
-    AsmJitHelper a;
+    using EntryType = _LDR_DATA_TABLE_ENTRY_BASE_T<T>;
+    ptr_t entryPtr = AllocateInHeap( mod.type, sizeof( _LDR_DATA_TABLE_ENTRY_W8<T> ) ).result( 0 );
+    if (entryPtr == 0)
+        return 0;
 
     // Allocate space for Unicode string
-    auto StringBuf = _process.memory().Allocate( MAX_PATH, PAGE_READWRITE );
-    StringBuf.Release();
+    _UNICODE_STRING_T<T> strLocal = { 0 };
+    auto mem = _process.memory().Allocate( 0x1000, PAGE_READWRITE, 0, false );
+    if (!mem)
+        return 0;
 
-    if (_LdrHeapBase)
-    {
-        eModType mt = _process.core().native()->GetWow64Barrier().sourceWow64 ? mt_mod32 : mt_mod64;
+    auto StringBuf = std::move( mem.result() );
 
-        auto RtlAllocateHeap = _process.modules().GetExport(
-            _process.modules().GetModule( L"ntdll.dll", LdrList, mt ), "RtlAllocateHeap" ).procAddress;
+    // entryPtr->DllBase = ModuleBase;
+    _process.memory().Write( fieldPtr( entryPtr, &EntryType::DllBase ), static_cast<T>(mod.baseAddress) );
 
+    // entryPtr->SizeOfImage = ImageSize;
+    _process.memory().Write( fieldPtr( entryPtr, &EntryType::SizeOfImage ), mod.size );
 
-        //
-        // HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(_LDR_DATA_TABLE_ENTRY_W8));
-        //
-        a.GenPrologue();
+    // entryPtr->EntryPoint = entryPoint;
+    _process.memory().Write( fieldPtr( entryPtr, &EntryType::EntryPoint ), static_cast<T>(mod.entryPoint) );
 
-        a.GenCall( static_cast<size_t>(RtlAllocateHeap), { _LdrHeapBase, HEAP_ZERO_MEMORY, sizeof( _LDR_DATA_TABLE_ENTRY_W7 ) } );
+    // Dll name hash
+    mod.hash = HashString( mod.name );
 
-        _process.remote().AddReturnWithEvent( a, mt );
-        a.GenEpilogue();
+    // Dll name
+    strLocal.Length = static_cast<WORD>(mod.name.length() * sizeof( wchar_t ));
+    strLocal.MaximumLength = 0x600;
+    strLocal.Buffer = StringBuf.ptr<T>();
+    StringBuf.Write( 0, strLocal.Length + 2, mod.name.c_str() );
 
-        _process.remote().ExecInWorkerThread( a->make(), a->getCodeSize(), result );
-        pEntry = reinterpret_cast<decltype(pEntry)>(result);
-    }
-    else
-    {
-        auto block = _process.memory().Allocate( sizeof( _LDR_DATA_TABLE_ENTRY_W8 ), PAGE_READWRITE );
-        pEntry = block.ptr<_LDR_DATA_TABLE_ENTRY_W7*>();
-        block.Release();
-    }
+    // entryPtr->BaseDllName = strLocal;
+    _process.memory().Write( fieldPtr( entryPtr, &EntryType::BaseDllName ), strLocal );
 
-    if(pEntry)
-    {
-        // pEntry->DllBase = ModuleBase;
-        _process.memory().Write( GET_FIELD_PTR( pEntry, DllBase ), ModuleBase );
+    // Dll full path
+    strLocal.Length = static_cast<WORD>(mod.fullPath.length() * sizeof( wchar_t ));
+    strLocal.Buffer = StringBuf.ptr<T>() + 0x800;
+    StringBuf.Write( 0x800, strLocal.Length + 2, mod.fullPath.c_str() );
 
-        // pEntry->SizeOfImage = ImageSize;
-        _process.memory().Write( GET_FIELD_PTR( pEntry, SizeOfImage ), static_cast<ULONG>(ImageSize) );
+    // entryPtr->FullDllName = strLocal;
+    _process.memory().Write( fieldPtr( entryPtr, &EntryType::FullDllName ), strLocal );
 
-        // pEntry->EntryPoint = entryPoint;
-        _process.memory().Write( GET_FIELD_PTR( pEntry, EntryPoint ), entryPoint );
+    // entryPtr->LoadCount = -1;
+    _process.memory().Write( fieldPtr( entryPtr, &EntryType::LoadCount ), strLocal );
 
-        // pEntry->LoadCount = -1;
-        _process.memory().Write( GET_FIELD_PTR( pEntry, LoadCount ), -1 );
+    return entryPtr;
+}
 
-        // Dll name
-        SAFE_CALL( RtlInitUnicodeString, &strLocal, dllname.c_str() );
+/// <summary>
+/// Initialize OS-specific module entry
+/// </summary>
+/// <param name="mod">Module data</param>
+/// <returns>Pointer to created entry</returns>
+template<typename T>
+ptr_t NtLdr::InitW8Node( NtLdrEntry& mod )
+{
+    using EntryType = _LDR_DATA_TABLE_ENTRY_W8<T>;
+    using DdagType = _LDR_DDAG_NODE<T>;
 
-        // Name hash
-        outHash = HashString( dllname );
+    ptr_t entryPtr = InitBaseNode<T>( mod );
+    ptr_t DdagNodePtr = AllocateInHeap( mod.type, sizeof( DdagType ) ).result( 0 );
+    if (!entryPtr || !DdagNodePtr)
+        return 0;
+ 
+    // entryPtr->BaseNameHashValue = hash;
+    _process.memory().Write( fieldPtr( entryPtr, &EntryType::BaseNameHashValue ), mod.hash );
 
-        // Write into buffer
-        strLocal.Buffer = StringBuf.ptr<PWSTR>();
-        StringBuf.Write( 0, dllname.length() * sizeof(wchar_t)+2, dllname.c_str() );
+    //
+    // Ddag node
+    //
 
-        // pEntry->BaseDllName = strLocal;
-        _process.memory().Write( GET_FIELD_PTR( pEntry, BaseDllName ), strLocal );
+    // entryPtr->DdagNode = pDdagNode;
+    _process.memory().Write( fieldPtr( entryPtr, &EntryType::DdagNode ), static_cast<T>(DdagNodePtr) );
 
-        // Dll full path
-        SAFE_CALL( RtlInitUnicodeString, &strLocal, dllpath.c_str() );
-        strLocal.Buffer = reinterpret_cast<PWSTR>(StringBuf.ptr<uint8_t*>() + 0x800);
-        StringBuf.Write( 0x800, dllpath.length() * sizeof(wchar_t) + 2, dllpath.c_str() );
+    // DdagNodePtr->State = LdrModulesReadyToRun;
+    _process.memory().Write( fieldPtr( DdagNodePtr, &DdagType::State ), LdrModulesReadyToRun );
 
-        // pEntry->FullDllName = strLocal;
-        _process.memory().Write( GET_FIELD_PTR( pEntry, FullDllName ), strLocal );
+    // DdagNodePtr->ReferenceCount = 1;
+    _process.memory().Write( fieldPtr( DdagNodePtr, &DdagType::ReferenceCount ), 1 );
 
-        // Forward Links
-        _process.memory().Write( GET_FIELD_PTR( pEntry, ForwarderLinks ), GET_FIELD_PTR( pEntry, ForwarderLinks ) );
-        _process.memory().Write( GET_FIELD_PTR( pEntry, ForwarderLinks ) + WordSize, GET_FIELD_PTR( pEntry, ForwarderLinks ) );
+    // DdagNodePtr->LoadCount = -1;
+    _process.memory().Write( fieldPtr( DdagNodePtr, &DdagType::LoadCount ), -1 );
 
-        return pEntry;
-    }
+    return entryPtr;
+}
 
-    return nullptr;
+/// <summary>
+///  Initialize OS-specific module entry
+/// </summary>
+/// <param name="mod">Module data</param>
+/// <returns>Pointer to created entry</returns>
+template<typename T>
+ptr_t NtLdr::InitW7Node( NtLdrEntry& mod )
+{
+    using EntryType = _LDR_DATA_TABLE_ENTRY_W7<T>;
+
+    ptr_t entryPtr = InitBaseNode<T>( mod );
+    if (!entryPtr)
+        return 0;
+
+    // Forward Links
+    _process.memory().Write( fieldPtr( entryPtr, &EntryType::ForwarderLinks ), fieldPtr( entryPtr, &EntryType::ForwarderLinks ) );
+    _process.memory().Write( fieldPtr( entryPtr, &EntryType::ForwarderLinks ) + sizeof( T ), fieldPtr( entryPtr, &EntryType::ForwarderLinks ) );
+
+    // Static links
+    _process.memory().Write( fieldPtr( entryPtr, &EntryType::StaticLinks ), fieldPtr( entryPtr, &EntryType::StaticLinks ) );
+    _process.memory().Write( fieldPtr( entryPtr, &EntryType::StaticLinks ) + sizeof( T ), fieldPtr( entryPtr, &EntryType::StaticLinks ) );
+
+    return entryPtr;
 }
 
 /// <summary>
 /// Insert entry into win8 module graph
 /// </summary>
-/// <param name="pNode">Node to insert</param>
-void NtLdr::InsertTreeNode( _LDR_DATA_TABLE_ENTRY_W8* pNode, size_t modBase )
+/// <param name="nodePtr">Node to insert</param>
+/// <param name="mod">Module data</param>
+template<typename T>
+void NtLdr::InsertTreeNode( ptr_t nodePtr, const NtLdrEntry& mod )
 {
     //
     // Win8 module tree
     //
-    size_t root = _process.memory().Read<size_t>( _LdrpModuleIndexBase );
+    auto root = _process.memory().Read<T>( _LdrpModuleIndexBase );
+    if (!root)
+        return;
 
-    _LDR_DATA_TABLE_ENTRY_W8 *pLdrNode = CONTAINING_RECORD( root, _LDR_DATA_TABLE_ENTRY_W8, BaseAddressIndexNode );
-    _LDR_DATA_TABLE_ENTRY_W8 LdrNode = _process.memory().Read<_LDR_DATA_TABLE_ENTRY_W8>( reinterpret_cast<ptr_t>(pLdrNode) );
-
+    auto LdrNodePtr = structBase( root.result(), &_LDR_DATA_TABLE_ENTRY_W8<T>::BaseAddressIndexNode );
+    auto LdrNode = _process.memory().Read<_LDR_DATA_TABLE_ENTRY_W8<T>>( LdrNodePtr ).result( _LDR_DATA_TABLE_ENTRY_W8<T>() );
     bool bRight = false;
 
     // Walk tree
     for (;;)
     {
-        if (modBase < LdrNode.DllBase)
+        if (static_cast<T>(mod.baseAddress) < LdrNode.DllBase)
         {
             if (LdrNode.BaseAddressIndexNode.Left)
             {
-                pLdrNode = CONTAINING_RECORD( LdrNode.BaseAddressIndexNode.Left, _LDR_DATA_TABLE_ENTRY_W8, BaseAddressIndexNode );
-                _process.memory().Read( reinterpret_cast<ptr_t>(pLdrNode), sizeof(LdrNode), &LdrNode );
+                LdrNodePtr = structBase( LdrNode.BaseAddressIndexNode.Left, &_LDR_DATA_TABLE_ENTRY_W8<T>::BaseAddressIndexNode );
+                _process.memory().Read( LdrNodePtr, sizeof(LdrNode), &LdrNode );
             }
             else
                 break;
         }
-        else if (modBase  > LdrNode.DllBase)
+        else if (static_cast<T>(mod.baseAddress) > LdrNode.DllBase)
         {
             if (LdrNode.BaseAddressIndexNode.Right)
             {
-                pLdrNode = CONTAINING_RECORD( LdrNode.BaseAddressIndexNode.Right, _LDR_DATA_TABLE_ENTRY_W8, BaseAddressIndexNode );
-                _process.memory().Read( reinterpret_cast<ptr_t>(pLdrNode), sizeof(LdrNode), &LdrNode );
+                LdrNodePtr = structBase( LdrNode.BaseAddressIndexNode.Right, &_LDR_DATA_TABLE_ENTRY_W8<T>::BaseAddressIndexNode );
+                _process.memory().Read( LdrNodePtr, sizeof(LdrNode), &LdrNode );
             }
             else
             {
@@ -592,34 +540,36 @@ void NtLdr::InsertTreeNode( _LDR_DATA_TABLE_ENTRY_W8* pNode, size_t modBase )
         else
         {
             // pLdrNode->DdagNode->ReferenceCount++;
-            _LDR_DDAG_NODE Ddag = _process.memory().Read<_LDR_DDAG_NODE>( reinterpret_cast<ptr_t>(LdrNode.DdagNode) );
+            auto Ddag = _process.memory().Read<_LDR_DDAG_NODE<T>>( LdrNode.DdagNode );
+            if (!Ddag)
+                return;
 
-            Ddag.ReferenceCount++;
-
-            _process.memory().Write( reinterpret_cast<ptr_t>(LdrNode.DdagNode), Ddag );
-
+            Ddag->ReferenceCount++;
+            _process.memory().Write( LdrNode.DdagNode, Ddag.result() );
             return;
         }
     }
 
     // Insert using RtlRbInsertNodeEx
-    
-    AsmJitHelper a;
+    auto a = AsmFactory::GetAssembler( mod.type );
     uint64_t result = 0;
+    auto RtlRbInsertNodeEx = _process.modules().GetNtdllExport( "RtlRbInsertNodeEx", mod.type );
+    if (!RtlRbInsertNodeEx)
+        return;
 
-    eModType mt = _process.core().native()->GetWow64Barrier().sourceWow64 ? mt_mod32 : mt_mod64;
+    a->GenPrologue();
+    a->GenCall( RtlRbInsertNodeEx->procAddress,
+    {
+        _LdrpModuleIndexBase,
+        fieldPtr( LdrNodePtr, &_LDR_DATA_TABLE_ENTRY_W8<T>::BaseAddressIndexNode ),
+        static_cast<T>(bRight),
+        fieldPtr( nodePtr, &_LDR_DATA_TABLE_ENTRY_W8<T>::BaseAddressIndexNode )
+    } );
 
-    auto RtlRbInsertNodeEx = _process.modules().GetExport( 
-        _process.modules().GetModule( L"ntdll.dll", LdrList, mt ), "RtlRbInsertNodeEx" ).procAddress;
+    _process.remote().AddReturnWithEvent( *a, mod.type );
+    a->GenEpilogue();
 
-    a.GenPrologue( );
-    a.GenCall( static_cast<size_t>(RtlRbInsertNodeEx), { _LdrpModuleIndexBase,
-                                                           GET_FIELD_PTR( pLdrNode, BaseAddressIndexNode ), 
-                                                           static_cast<size_t>(bRight), GET_FIELD_PTR( pNode, BaseAddressIndexNode ) } );
-    _process.remote().AddReturnWithEvent( a, mt );
-    a.GenEpilogue();
-
-    _process.remote().ExecInWorkerThread( a->make(), a->getCodeSize(), result );
+    _process.remote().ExecInWorkerThread( (*a)->make(), (*a)->getCodeSize(), result );
 }
 
 /// <summary>
@@ -627,27 +577,28 @@ void NtLdr::InsertTreeNode( _LDR_DATA_TABLE_ENTRY_W8* pNode, size_t modBase )
 /// </summary>
 /// <param name="pNodeMemoryOrderLink">InMemoryOrderModuleList link of entry to be inserted</param>
 /// <param name="pNodeLoadOrderLink">InLoadOrderModuleList link of entry to be inserted</param>
-void NtLdr::InsertMemModuleNode( size_t pNodeMemoryOrderLink, size_t pNodeLoadOrderLink, size_t pNodeInitOrderLink )
+template<typename T>
+void NtLdr::InsertMemModuleNode( ptr_t pNodeMemoryOrderLink, ptr_t pNodeLoadOrderLink, ptr_t pNodeInitOrderLink )
 {
-    PEB_T* pPeb = reinterpret_cast<PEB_T*>(_process.core().peb());
-    PEB_LDR_DATA_T* pLdr = nullptr;
+    ptr_t pPeb = _process.core().peb<T>();
+    ptr_t pLdr = 0;
 
-    if(pPeb)
-        pLdr = _process.memory().Read<PEB_LDR_DATA_T*>( GET_FIELD_PTR( pPeb, Ldr ) );
+    if (pPeb)
+        pLdr = _process.memory().Read<T>( fieldPtr( pPeb, &PEB_T::Ldr ) ).result( 0 );
                 
     if (pLdr)
     {
         // pLdr->InMemoryOrderModuleList
         if (pNodeMemoryOrderLink)
-            InsertTailList( GET_FIELD_PTR( pLdr, InMemoryOrderModuleList ), pNodeMemoryOrderLink );
+            InsertTailList<T>( fieldPtr( pLdr, &_PEB_LDR_DATA2_T<T>::InMemoryOrderModuleList ), pNodeMemoryOrderLink );
 
         // pLdr->InLoadOrderModuleList
         if (pNodeLoadOrderLink)
-            InsertTailList( GET_FIELD_PTR( pLdr, InLoadOrderModuleList ), pNodeLoadOrderLink );
+            InsertTailList<T>( fieldPtr( pLdr, &_PEB_LDR_DATA2_T<T>::InLoadOrderModuleList ), pNodeLoadOrderLink );
 
         // pLdr->InInitializationOrderModuleList
         if (pNodeInitOrderLink)
-            InsertTailList( GET_FIELD_PTR( pLdr, InInitializationOrderModuleList ), pNodeInitOrderLink );
+            InsertTailList<T>( fieldPtr( pLdr, &_PEB_LDR_DATA2_T<T>::InInitializationOrderModuleList ), pNodeInitOrderLink );
     }
 }
 
@@ -656,13 +607,15 @@ void NtLdr::InsertMemModuleNode( size_t pNodeMemoryOrderLink, size_t pNodeLoadOr
 /// </summary>
 /// <param name="pNodeLink">Link of entry to be inserted</param>
 /// <param name="hash">Module hash</param>
-void NtLdr::InsertHashNode( size_t pNodeLink, ULONG hash )
+template<typename T>
+void NtLdr::InsertHashNode( ptr_t pNodeLink, ULONG hash )
 {
     if(pNodeLink)
     {
         // LrpHashTable record
-        auto pHashList = _process.memory().Read<size_t>( _LdrpHashTable + sizeof(LIST_ENTRY)*(hash & 0x1F) );
-        InsertTailList( pHashList, pNodeLink );
+        auto pHashList = _process.memory().Read<T>( _LdrpHashTable + sizeof( _LIST_ENTRY_T<T> )*(hash & 0x1F) );
+        if(pHashList)
+            InsertTailList<T>( pHashList.result(), pNodeLink );
     }
 }
 
@@ -671,26 +624,27 @@ void NtLdr::InsertHashNode( size_t pNodeLink, ULONG hash )
 /// </summary>
 /// <param name="ListHead">List head pointer</param>
 /// <param name="Entry">Entry list link to be inserted</param>
-void NtLdr::InsertTailList( size_t ListHead, size_t Entry )
+template<typename T>
+void NtLdr::InsertTailList( ptr_t ListHead, ptr_t Entry )
 {
     // PrevEntry = ListHead->Blink;
-    auto PrevEntry = _process.memory().Read<size_t>( GET_FIELD_PTR( reinterpret_cast<PLIST_ENTRY>(ListHead), Blink) );
+    auto PrevEntry = _process.memory().Read<T>( fieldPtr( ListHead, &_LIST_ENTRY_T<T>::Blink ) ).result( 0 );
 
     // Entry->Flink = ListHead;
     // Entry->Blink = PrevEntry;
-    _process.memory().Write( GET_FIELD_PTR( reinterpret_cast<PLIST_ENTRY>(Entry), Flink ), ListHead );
-    _process.memory().Write( GET_FIELD_PTR( reinterpret_cast<PLIST_ENTRY>(Entry), Blink ), PrevEntry );
+    _process.memory().Write( fieldPtr( Entry, &_LIST_ENTRY_T<T>::Flink ), sizeof(T), &ListHead );
+    _process.memory().Write( fieldPtr( Entry, &_LIST_ENTRY_T<T>::Blink ), sizeof( T ), &PrevEntry );
 
     // PrevEntry->Flink = Entry;
     // ListHead->Blink  = Entry;
-    _process.memory().Write( GET_FIELD_PTR( reinterpret_cast<PLIST_ENTRY>(PrevEntry), Flink ), Entry );
-    _process.memory().Write( GET_FIELD_PTR( reinterpret_cast<PLIST_ENTRY>(ListHead), Blink ), Entry );
+    _process.memory().Write( fieldPtr( PrevEntry, &_LIST_ENTRY_T<T>::Flink ), sizeof( T ), &Entry );
+    _process.memory().Write( fieldPtr( ListHead, &_LIST_ENTRY_T<T>::Blink ), sizeof( T ), &Entry );
 }
 
 /// <summary>
 /// Hash image name
 /// </summary>
-/// <param name="str">Iamge name</param>
+/// <param name="str">Image name</param>
 /// <returns>Hash</returns>
 ULONG NtLdr::HashString( const std::wstring& str )
 {
@@ -700,7 +654,7 @@ ULONG NtLdr::HashString( const std::wstring& str )
     {
         UNICODE_STRING ustr;
         SAFE_CALL( RtlInitUnicodeString, &ustr, str.c_str() );
-        SAFE_NATIVE_CALL( RtlHashUnicodeString, &ustr, (BOOLEAN)TRUE, 0, &hash );
+        SAFE_NATIVE_CALL( RtlHashUnicodeString, &ustr, BOOLEAN(TRUE), 0, &hash );
     }
     else
     {
@@ -712,45 +666,99 @@ ULONG NtLdr::HashString( const std::wstring& str )
 }
 
 /// <summary>
+/// Allocate memory from heap if possible
+/// </summary>
+/// <param name="size">Module type</param>
+/// <param name="size">Size to allocate</param>
+/// <returns>Allocated address</returns>
+call_result_t<ptr_t> NtLdr::AllocateInHeap( eModType mt, size_t size )
+{
+    NTSTATUS status = STATUS_SUCCESS;
+    auto RtlAllocateHeap = _process.modules().GetNtdllExport( "RtlAllocateHeap", mt );
+    if (_LdrHeapBase && RtlAllocateHeap)
+    {
+        auto a = AsmFactory::GetAssembler( mt );
+
+        //
+        // HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, size);
+        //
+        a->GenPrologue();
+        a->GenCall( RtlAllocateHeap->procAddress, { _LdrHeapBase, HEAP_ZERO_MEMORY, size } );
+        _process.remote().AddReturnWithEvent( (*a), mt );
+        a->GenEpilogue();
+
+        uint64_t result = 0;
+        status = _process.remote().ExecInWorkerThread( (*a)->make(), (*a)->getCodeSize(), result );
+        if (NT_SUCCESS( status ))
+            return result;
+    }
+    else
+        status = STATUS_ORDINAL_NOT_FOUND;
+
+    if (!NT_SUCCESS( status ))
+    {
+        auto mem = _process.memory().Allocate( size, PAGE_READWRITE, 0, false );
+        if (!mem)
+            return mem.status;
+
+        return mem->ptr();
+    }
+
+    return STATUS_ILLEGAL_FUNCTION;
+}
+
+/// <summary>
 /// Find LdrpHashTable[] variable
 /// </summary>
 /// <returns>true on success</returns>
-bool NtLdr::FindLdrpHashTable( )
+template<typename T>
+bool NtLdr::FindLdrpHashTable()
 {
-    PEB_LDR_DATA_T *Ldr = 
-        reinterpret_cast<PEB_LDR_DATA_T*>(
-        reinterpret_cast<PEB_T*>(
-        reinterpret_cast<TEB_T*>(NtCurrentTeb())->ProcessEnvironmentBlock)->Ldr);
+    _PEB_T<T> Peb = { 0 };
+    _process.core().peb( &Peb );
+    if (Peb.ImageBaseAddress == 0)
+        return false;
 
-    LDR_DATA_TABLE_ENTRY_BASE_T *Ntdll = CONTAINING_RECORD( Ldr->InInitializationOrderModuleList.Flink,
-                                                            LDR_DATA_TABLE_ENTRY_BASE_T, InInitializationOrderLinks );
+    auto Ldr = _process.memory().Read<_PEB_LDR_DATA2_T<T>>( Peb.Ldr );
+    if (!Ldr)
+        return false;
 
-    ULONG NtdllHashIndex = HashString( reinterpret_cast<wchar_t*>(Ntdll->BaseDllName.Buffer) ) & 0x1F;
+    // Get loader entry
+    _LDR_DATA_TABLE_ENTRY_BASE_T<T> entry = { 0 };
+    auto entryPtr = structBase( Ldr->InInitializationOrderModuleList.Flink, &_LDR_DATA_TABLE_ENTRY_BASE_T<T>::InInitializationOrderLinks );
+    if (!NT_SUCCESS( _process.memory().Read( entryPtr, entry ) ))
+        return false;
 
-    ULONG_PTR NtdllBase = static_cast<ULONG_PTR>(Ntdll->DllBase);
-    ULONG_PTR NtdllEndAddress = NtdllBase + Ntdll->SizeOfImage - 1;
+    wchar_t nameBuf[260] = { 0 };
+    if (!NT_SUCCESS( _process.memory().Read( entry.BaseDllName.Buffer, entry.BaseDllName.Length + 2, nameBuf ) ))
+        return false;
+
+    ULONG NtdllHashIndex = HashString( nameBuf ) & 0x1F;
+    T NtdllBase = static_cast<T>(entry.DllBase);
+    T NtdllEndAddress = NtdllBase + entry.SizeOfImage - 1;
 
     // scan hash list to the head (head is located within ntdll)
-    bool bHeadFound = false;
-    PLIST_ENTRY pNtdllHashHead = NULL;
+    T NtdllHashHeadPtr = 0;
+    _LIST_ENTRY_T<T> hashNode = entry.HashLinks;
 
-    for (PLIST_ENTRY e = reinterpret_cast<PLIST_ENTRY>(Ntdll->HashLinks.Flink);
-          e != reinterpret_cast<PLIST_ENTRY>(&Ntdll->HashLinks);
-          e = e->Flink)
+    for (auto e = hashNode.Flink;
+        e != fieldPtr( entryPtr, &_LDR_DATA_TABLE_ENTRY_BASE_T<T>::HashLinks ); 
+        e = hashNode.Flink)
     {
-        if (reinterpret_cast<ULONG_PTR>(e) >= NtdllBase && 
-            reinterpret_cast<ULONG_PTR>(e) < NtdllEndAddress)
+        if (e >= NtdllBase && e < NtdllEndAddress)
         {
-            bHeadFound = true;
-            pNtdllHashHead = e;
+            NtdllHashHeadPtr = e;
             break;
         }
+
+        if (!NT_SUCCESS ( _process.memory().Read( hashNode.Flink, hashNode ) ))
+            return false;
     }
 
-    if (bHeadFound)
-        _LdrpHashTable = reinterpret_cast<size_t>(pNtdllHashHead - NtdllHashIndex);
+    if (NtdllHashHeadPtr != 0)
+        _LdrpHashTable = NtdllHashHeadPtr - NtdllHashIndex * sizeof( _LIST_ENTRY_T<T> );
 
-   return bHeadFound;
+    return _LdrpHashTable != 0;
 }
 
 
@@ -758,48 +766,57 @@ bool NtLdr::FindLdrpHashTable( )
 /// Find LdrpModuleIndex variable under win8
 /// </summary>
 /// <returns>true on success</returns>
-bool NtLdr::FindLdrpModuleIndexBase( )
+template<typename T>
+bool NtLdr::FindLdrpModuleIndexBase()
 {
-    PEB_T* pPeb = reinterpret_cast<PEB_T*>(reinterpret_cast<TEB_T*>(NtCurrentTeb())->ProcessEnvironmentBlock);
+    _PEB_T<T> Peb = { 0 };
+    _process.core().peb( &Peb );
 
-    if(pPeb)
+    if (Peb.ImageBaseAddress != 0)
     {
-        PRTL_BALANCED_NODE lastNode = 0;
-        PEB_LDR_DATA_T* Ldr = reinterpret_cast<PEB_LDR_DATA_T*>(pPeb->Ldr);
-        _LDR_DATA_TABLE_ENTRY_W8 *Ntdll = CONTAINING_RECORD( Ldr->InInitializationOrderModuleList.Flink, 
-                                                             _LDR_DATA_TABLE_ENTRY_W8, InInitializationOrderLinks );
+        T lastNode = 0;
+        auto Ldr = _process.memory().Read<_PEB_LDR_DATA2_T<T>>( Peb.Ldr );
+        if (!Ldr)
+            return false;
 
-        PRTL_BALANCED_NODE pNode = &Ntdll->BaseAddressIndexNode;
+        auto entryPtr = structBase( Ldr->InInitializationOrderModuleList.Flink, &_LDR_DATA_TABLE_ENTRY_W8<T>::InInitializationOrderLinks );
+
+        _RTL_BALANCED_NODE<T> node = { 0 };
+        if (!NT_SUCCESS( _process.memory().Read( fieldPtr( entryPtr, &_LDR_DATA_TABLE_ENTRY_W8<T>::BaseAddressIndexNode ), node ) ))
+            return false;
 
         // Get root node
-        for(; pNode->ParentValue; )
+        for(; node.ParentValue; )
         {
             // Ignore last few bits
-            lastNode = reinterpret_cast<PRTL_BALANCED_NODE>(pNode->ParentValue & size_t( -8 ));
-            pNode = lastNode;
+            lastNode = node.ParentValue & T( -8 );
+            if (!NT_SUCCESS( _process.memory().Read( lastNode, node ) ))
+                return false;
         }
 
         // Get pointer to root
-        pe::PEImage ntdll;
-        size_t* pStart = nullptr;
-        size_t* pEnd = nullptr;
+        pe::PEImage ntdllPE;
+        T* pStart = nullptr;
+        T* pEnd = nullptr;
 
-        ntdll.Parse( reinterpret_cast<void*>(Ntdll->DllBase) );
+        auto pNtdll = _process.modules().GetModule( L"ntdll.dll" );
+        std::unique_ptr<uint8_t[]> localBuf( new uint8_t[pNtdll->size] );
+        _process.memory().Read( pNtdll->baseAddress, pNtdll->size, localBuf.get() );
 
-        for (auto& section : ntdll.sections())
+        ntdllPE.Parse( localBuf.get() );
+
+        for (auto& section : ntdllPE.sections())
             if (_stricmp( reinterpret_cast<LPCSTR>(section.Name), ".data") == 0 )
             {
-                pStart = reinterpret_cast<size_t*>(Ntdll->DllBase + section.VirtualAddress);
-                pEnd   = reinterpret_cast<size_t*>(Ntdll->DllBase + section.VirtualAddress + section.Misc.VirtualSize);
-
+                pStart = reinterpret_cast<T*>( localBuf.get() + section.VirtualAddress);
+                pEnd   = reinterpret_cast<T*>( localBuf.get() + section.VirtualAddress + section.Misc.VirtualSize);
                 break;
             }
 
-        auto iter = std::find( pStart, pEnd, reinterpret_cast<size_t>(lastNode) );
-
+        auto iter = std::find( pStart, pEnd, lastNode );
         if (iter != pEnd)
         {
-            _LdrpModuleIndexBase = reinterpret_cast<size_t>(iter);
+            _LdrpModuleIndexBase = REBASE( iter, localBuf.get(), pNtdll->baseAddress );
             return true;
         }
     }
@@ -807,256 +824,18 @@ bool NtLdr::FindLdrpModuleIndexBase( )
     return false;
 }
 
-
-/// <summary>
-/// Search for RtlInsertInvertedFunctionTable, LdrpInvertedFunctionTable, LdrpHandleTlsData.
-/// </summary>
-/// <returns>true on success</returns>
-bool NtLdr::ScanPatterns( )
-{
-    std::vector<ptr_t> foundData;
-    pe::PEImage ntdll;
-    void* pStart  = nullptr;
-    size_t scanSize = 0;
-
-    HMODULE hNtdll = GetModuleHandleW( L"ntdll.dll" );
-    ntdll.Parse( hNtdll );
-
-    // Find ntdll code section
-    for (auto& section : ntdll.sections())
-    {
-        if (_stricmp( reinterpret_cast<LPCSTR>(section.Name), ".text" ) == 0)
-        {
-            pStart = reinterpret_cast<void*>(reinterpret_cast<size_t>(hNtdll) + section.VirtualAddress);
-            scanSize = section.Misc.VirtualSize;
-
-            break;
-        }
-    }
-
-    // Code section not found
-    if(pStart == nullptr)
-        return false;
-
-    // Win 8.1 and later
-    if (IsWindows8Point1OrGreater())
-    {
-    #ifdef USE64
-        // LdrpHandleTlsData
-        // 44 8D 43 09 4C 8D 4C 24 38
-        PatternSearch ps( "\x44\x8d\x43\x09\x4c\x8d\x4c\x24\x38" );
-        ps.Search( pStart, scanSize, foundData );
-
-        if (!foundData.empty())
-            _LdrpHandleTlsData = static_cast<size_t>(foundData.front() - 0x43);
-    #else
-        // RtlInsertInvertedFunctionTable
-        // 53 56 57 8B DA 8B F9 50 
-        PatternSearch ps1( "\x53\x56\x57\x8b\xda\x8b\xf9\x50" );
-        ps1.Search( pStart, scanSize, foundData );
-
-        if (!foundData.empty())
-        {
-            _RtlInsertInvertedFunctionTable = static_cast<size_t>(foundData.front() - 0xB);
-
-            if (IsWindows10OrGreater())
-                _LdrpInvertedFunctionTable = *reinterpret_cast<size_t*>(foundData.front() + 0x22);
-            else
-                _LdrpInvertedFunctionTable = *reinterpret_cast<size_t*>(foundData.front() + 0x23);
-
-            foundData.clear();
-        }
-        // Rescan using old pattern
-        else
-        {
-            // RtlInsertInvertedFunctionTable
-            // 8D 45 F4 89 55 F8 50 8D 55 FC
-            PatternSearch ps12( "\x8d\x45\xf4\x89\x55\xf8\x50\x8d\x55\xfc" );
-            ps12.Search( pStart, scanSize, foundData );
-
-            if (!foundData.empty())
-            {
-                _RtlInsertInvertedFunctionTable = static_cast<size_t>(foundData.front() - 0xB);
-                _LdrpInvertedFunctionTable = *reinterpret_cast<size_t*>(foundData.front() + 0x1D);
-                foundData.clear();
-            }
-        }
-
-        // LdrpHandleTlsData
-        // 8D 45 ?? 50 6A 09 6A 01 8B C1
-        PatternSearch ps2( "\x8d\x45\xcc\x50\x6a\x09\x6a\x01\x8b\xc1" );
-        ps2.Search( 0xCC, pStart, scanSize, foundData );
-
-        if (!foundData.empty())
-        {
-            _LdrpHandleTlsData = static_cast<size_t>(foundData.front() - 0x18);
-            foundData.clear();
-        }
-
-        // LdrProtectMrdata
-        // 83 7D 08 00 8B 35    
-        PatternSearch ps3( "\x83\x7d\x08\x00\x8b\x35", 6 );
-        ps3.Search( pStart, scanSize, foundData );
-
-        if (!foundData.empty())
-            _LdrProtectMrdata = static_cast<size_t>(foundData.front() - 0x12);
-    #endif
-    }
-    // Win 8
-    else if (IsWindows8OrGreater())
-    {
-    #ifdef USE64
-        // LdrpHandleTlsData
-        // 48 8B 79 30 45 8D 66 01
-        PatternSearch ps( "\x48\x8b\x79\x30\x45\x8d\x66\x01" );
-        ps.Search( pStart, scanSize, foundData );
-
-        if (!foundData.empty())
-            _LdrpHandleTlsData = static_cast<size_t>(foundData.front() - 0x49);
-    #else
-        // RtlInsertInvertedFunctionTable
-        // 8B FF 55 8B EC 51 51 53 57 8B 7D 08 8D
-        PatternSearch ps1( "\x8b\xff\x55\x8b\xec\x51\x51\x53\x57\x8b\x7d\x08\x8d" );
-        ps1.Search( pStart, scanSize, foundData );
-
-        if(!foundData.empty())
-        {
-            _RtlInsertInvertedFunctionTable = static_cast<size_t>(foundData.front());
-            _LdrpInvertedFunctionTable = *reinterpret_cast<size_t*>(_RtlInsertInvertedFunctionTable + 0x26);
-            foundData.clear();
-        }
-
-        // LdrpHandleTlsData
-        // 8B 45 08 89 45 A0
-        PatternSearch ps2( "\x8b\x45\x08\x89\x45\xa0" );
-        ps2.Search( pStart, scanSize, foundData );
-
-        if (!foundData.empty())
-            _LdrpHandleTlsData = static_cast<size_t>(foundData.front() - 0xC);             
-    #endif
-    }
-    // Win 7
-    else if(IsWindows7OrGreater())
-    {
-    #ifdef USE64
-        // LdrpHandleTlsData
-        // 41 B8 09 00 00 00 48 8D 44 24 38
-        PatternSearch ps1( "\x41\xb8\x09\x00\x00\x00\x48\x8d\x44\x24\x38", 11 );
-        ps1.Search( pStart, scanSize, foundData );
-
-        if (!foundData.empty())
-        {
-            _LdrpHandleTlsData = static_cast<size_t>(foundData.front() - 0x27);
-            foundData.clear();            
-        }
-
-        // LdrpFindOrMapDll patch address
-        // 48 8D 8C 24 98 00 00 00 41 b0 01
-        PatternSearch ps2( "\x48\x8D\x8C\x24\x98\x00\x00\x00\x41\xb0\x01", 11 );
-        ps2.Search( pStart, scanSize, foundData );
-
-        if (!foundData.empty())
-        {
-            _LdrKernel32PatchAddress = static_cast<size_t>(foundData.front() + 0x12);
-            foundData.clear();            
-        }
-
-        // KiUserApcDispatcher patch address
-        // 48 8B 4C 24 18 48 8B C1 4C
-        PatternSearch ps3( "\x48\x8b\x4c\x24\x18\x48\x8b\xc1\x4c");
-        ps3.Search( pStart, scanSize, foundData );
-
-        if (!foundData.empty())
-        {
-            _APC64PatchAddress = static_cast<size_t>(foundData.front());
-            foundData.clear();            
-        }
-    #else
-        // RtlInsertInvertedFunctionTable
-        // 8B FF 55 8B EC 56 68
-        PatternSearch ps1( "\x8b\xff\x55\x8b\xec\x56\x68" );
-        ps1.Search( pStart, scanSize, foundData);
-
-        if(!foundData.empty())
-        {
-            _RtlInsertInvertedFunctionTable = static_cast<size_t>(foundData.front( ));
-            foundData.clear();
-        }
-
-        // RtlLookupFunctionTable + 0x11
-        // 89 5D E0 38
-        PatternSearch ps2( "\x89\x5D\xE0\x38" );
-        ps2.Search( pStart, scanSize, foundData );
-                
-        if(!foundData.empty())
-        {
-            _LdrpInvertedFunctionTable = *reinterpret_cast<size_t*>(foundData.front() + 0x1B);
-            foundData.clear();
-        }
-
-        // LdrpHandleTlsData
-        // 74 20 8D 45 D4 50 6A 09 
-        PatternSearch ps3( "\x74\x20\x8d\x45\xd4\x50\x6a\x09" );
-        ps3.Search( pStart, scanSize, foundData );
-
-        if(!foundData.empty())
-            _LdrpHandleTlsData = static_cast<size_t>(foundData.front() - 0x14);
-
-    #endif
-    }
-
-    //
-    // Report errors
-    // 
-#ifndef BLACBONE_NO_TRACE
-    if (_LdrpHashTable == 0)
-        BLACBONE_TRACE( "NativeLdr: LdrpHashTable not found" );
-    if (IsWindows8OrGreater() && _LdrpModuleIndexBase == 0)
-        BLACBONE_TRACE( "NativeLdr: LdrpModuleIndexBase not found" );
-    if (_LdrHeapBase == 0)
-        BLACBONE_TRACE( "NativeLdr: LdrHeapBase not found" );
-    if (_LdrpHandleTlsData == 0)
-        BLACBONE_TRACE( "NativeLdr: LdrpHandleTlsData not found" );
-#ifdef USE64
-    if (IsWindows7OrGreater())
-    {
-        if (_LdrKernel32PatchAddress == 0)
-            BLACBONE_TRACE( "NativeLdr: LdrKernel32PatchAddress not found" );
-        if (_APC64PatchAddress == 0)
-            BLACBONE_TRACE( "NativeLdr: APC64PatchAddress not found" );
-    }
-#else
-    if (_LdrpInvertedFunctionTable == 0)
-        BLACBONE_TRACE( "NativeLdr: LdrpInvertedFunctionTable not found" );
-    if (_RtlInsertInvertedFunctionTable == 0)
-        BLACBONE_TRACE( "NativeLdr: RtlInsertInvertedFunctionTable not found" );
-#endif
-    if (IsWindows8Point1OrGreater() && _LdrProtectMrdata == 0)
-        BLACBONE_TRACE( "NativeLdr: LdrProtectMrdata not found" );
-#endif
-    return true;
-}
-
-
 /// <summary>
 /// Find Loader heap base
 /// </summary>
 /// <returns>true on success</returns>
+template<typename T>
 bool NtLdr::FindLdrHeap()
 {
-    PEB_T* pPeb = reinterpret_cast<PEB_T*>(_process.core().peb());
-    MEMORY_BASIC_INFORMATION64 mbi = { 0 };
-
-    if (pPeb)
+    _PEB_T<T> peb = { };
+    if (_process.core().peb<T>( &peb ) != 0)
     {
-        PEB_LDR_DATA Ldr = _process.memory().Read<PEB_LDR_DATA>( _process.memory().Read<size_t>( GET_FIELD_PTR( pPeb, Ldr ) ) );
-        PLDR_DATA_TABLE_ENTRY NtdllEntry = CONTAINING_RECORD( Ldr.InMemoryOrderModuleList.Flink, LDR_DATA_TABLE_ENTRY, InMemoryOrderLinks );
-
-        if (_process.core().native()->VirtualQueryExT( reinterpret_cast<ptr_t>(NtdllEntry), &mbi ) == STATUS_SUCCESS)
-        {
-            _LdrHeapBase = static_cast<size_t>(mbi.AllocationBase);
-            return true;
-        }
+        _LdrHeapBase = peb.ProcessHeap;
+        return true;
     }
 
     return false;
@@ -1065,25 +844,25 @@ bool NtLdr::FindLdrHeap()
 /// <summary>
 /// Unlink module from Ntdll loader
 /// </summary>
-/// <param name="baseAddress">Module base address</param>
-/// <param name="type">32 or 64 bit.</param>
+/// <param name="mod">Module data</param>
+/// <param name="noThread">Don't create new threads during unlink</param>
 /// <returns>true on success</returns>
-bool NtLdr::Unlink( ptr_t baseAddress, const std::wstring& name, eModType type )
+bool NtLdr::Unlink( const ModuleData& mod, bool noThread /*= false*/ )
 {
     ptr_t ldrEntry = 0;
+    auto x64Image = mod.type == mt_mod64;
+
+    // Reinitialize
+    if (_initializedFor != mod.type)
+        Init( mod.type );
 
     // Unlink from linked lists
-    if (type == mt_mod32)
-        ldrEntry = UnlinkFromLdr<DWORD>( baseAddress, name );
-    else
-        ldrEntry = UnlinkFromLdr<DWORD64>( baseAddress, name );
-
-    auto barrier = _process.core().native()->GetWow64Barrier();
+    ldrEntry = CALL_64_86( x64Image, UnlinkFromLdr, mod );
 
     // Unlink from graph
     // TODO: Unlink from _LdrpMappingInfoIndex. Still can't decide if it is required.
-    if ((barrier.type == wow_32_32 || barrier.type == wow_64_64) && ldrEntry && IsWindows8OrGreater())
-        UnlinkTreeNode( ldrEntry );
+    if (IsWindows8OrGreater())
+        ldrEntry = CALL_64_86( x64Image, UnlinkTreeNode, mod, ldrEntry, noThread );
 
     return ldrEntry != 0;
 }
@@ -1091,96 +870,56 @@ bool NtLdr::Unlink( ptr_t baseAddress, const std::wstring& name, eModType type )
 /// <summary>
 /// Unlink module from PEB_LDR_DATA
 /// </summary>
-/// <param name="baseAddress">Module base address.</param>
+/// <param name="mod">Module data</param>
 /// <returns>Address of removed record</returns>
 template<typename T>
-ptr_t NtLdr::UnlinkFromLdr( ptr_t baseAddress, const std::wstring& name )
+ptr_t NtLdr::UnlinkFromLdr( const ModuleData& mod )
 {
-    typename _PEB_T2<T>::type peb = { { { 0 } } };
-    _PEB_LDR_DATA2<T> ldr = { 0 };
+    auto ldrEntry = mod.ldrPtr;
+    if (ldrEntry == 0)
+        ldrEntry = FindLdrEntry<T>( mod.baseAddress );
 
-    auto native = _process.core().native();
-
-    if (native->getPEB( &peb ) != 0 && native->ReadProcessMemoryT( peb.Ldr, &ldr, sizeof(ldr), 0 ) == STATUS_SUCCESS)
+    // Unlink from module lists
+    if (ldrEntry != 0)
     {
-        ptr_t ldrEntry = 0;
-
-        // InLoadOrderModuleList
-        ldrEntry |= UnlinkListEntry(
-            ldr.InLoadOrderModuleList,
-            peb.Ldr + FIELD_OFFSET( _PEB_LDR_DATA2<T>, InLoadOrderModuleList ),
-            FIELD_OFFSET( _LDR_DATA_TABLE_ENTRY_BASE<T>, InLoadOrderLinks ),
-            baseAddress
-            );
-
-        // InMemoryOrderModuleList
-        ldrEntry |= UnlinkListEntry(
-            ldr.InMemoryOrderModuleList,
-            peb.Ldr + FIELD_OFFSET( _PEB_LDR_DATA2<T>, InMemoryOrderModuleList ),
-            FIELD_OFFSET( _LDR_DATA_TABLE_ENTRY_BASE<T>, InMemoryOrderLinks ),
-            baseAddress
-            );
-
-        // InInitializationOrderModuleList
-        ldrEntry |= UnlinkListEntry(
-            ldr.InInitializationOrderModuleList,
-            peb.Ldr + FIELD_OFFSET( _PEB_LDR_DATA2<T>, InInitializationOrderModuleList ),
-            FIELD_OFFSET( _LDR_DATA_TABLE_ENTRY_BASE<T>, InInitializationOrderLinks ),
-            baseAddress
-            );
-
-        // Hash table
-        if (ldrEntry == 0)
-        { 
-            //
-            // Search module in hash list
-            //
-            auto pHashList = _LdrpHashTable + sizeof( _LIST_ENTRY_T<T> )*(HashString( name ) & 0x1F);
-            auto hashList = _process.memory().Read<_LIST_ENTRY_T<T>>( pHashList );
-
-            UnlinkListEntry( hashList, pHashList,FIELD_OFFSET( _LDR_DATA_TABLE_ENTRY_BASE<T>, HashLinks ), baseAddress );
-        }
-        else
-            UnlinkListEntry<T>( ldrEntry + FIELD_OFFSET( _LDR_DATA_TABLE_ENTRY_BASE<T>, HashLinks ) );
-
-        return ldrEntry;
+        UnlinkListEntry<T>( fieldPtr( ldrEntry, &_LDR_DATA_TABLE_ENTRY_BASE_T<T>::InLoadOrderLinks ) );
+        UnlinkListEntry<T>( fieldPtr( ldrEntry, &_LDR_DATA_TABLE_ENTRY_BASE_T<T>::InMemoryOrderLinks ) );
+        UnlinkListEntry<T>( fieldPtr( ldrEntry, &_LDR_DATA_TABLE_ENTRY_BASE_T<T>::InInitializationOrderLinks ) );
+        UnlinkListEntry<T>( fieldPtr( ldrEntry, &_LDR_DATA_TABLE_ENTRY_BASE_T<T>::HashLinks ) );
     }
 
-    return 0;
+    return ldrEntry;
 }
 
 /// <summary>
-/// Search and remove record from LIST_ENTRY structure
+/// Finds LDR entry for module
 /// </summary>
-/// <param name="pListEntry">List to remove from</param>
-/// <param name="head">List head address</param>
-/// <param name="ofst">Offset of link in _LDR_DATA_TABLE_ENTRY_BASE struct</param>
-/// <param name="baseAddress">Record to remove.</param>
-/// <returns>Address of removed record</returns>
+/// <param name="moduleBase">Target module base</param>
+/// <param name="found">Found entry</param>
+/// <returns>Found LDR entry address</returns>
 template<typename T>
-ptr_t NtLdr::UnlinkListEntry( _LIST_ENTRY_T<T> pListEntry, ptr_t head, size_t ofst, ptr_t baseAddress )
+ptr_t NtLdr::FindLdrEntry( module_t moduleBase, _LDR_DATA_TABLE_ENTRY_BASE_T<T>* found /*= nullptr*/ )
 {
     auto native = _process.core().native();
+    _PEB_T<T> peb = { };
+    _PEB_LDR_DATA2_T<T> ldr = { };
+    _LDR_DATA_TABLE_ENTRY_BASE_T<T> localEntry = { };
+    if (found == nullptr)
+        found = &localEntry;
 
-    for (T entry = pListEntry.Flink; entry != 0 && entry != head; native->ReadProcessMemoryT( entry, &entry, sizeof( entry ) ))
+    if (native->getPEB( &peb ) != 0 && NT_SUCCESS( native->ReadProcessMemoryT( peb.Ldr, &ldr, sizeof( ldr ) ) ))
     {
-        _LDR_DATA_TABLE_ENTRY_BASE<T> modData = { { 0 } };
+        const auto ofst = offsetOf( &_LDR_DATA_TABLE_ENTRY_BASE_T<T>::InLoadOrderLinks );
+        const auto head = fieldPtr( peb.Ldr, &_PEB_LDR_DATA2_T<T>::InLoadOrderModuleList );
 
-        native->ReadProcessMemoryT( entry - ofst, &modData, sizeof(modData), 0 );
-
-        // Unlink if found
-        if (modData.DllBase == (T)baseAddress)
+        for (T entry = ldr.InLoadOrderModuleList.Flink;
+            entry != 0 && entry != head;
+            native->ReadProcessMemoryT( entry, &entry, sizeof( entry ) )
+            )
         {
-            T OldFlink = _process.memory().Read<T>( entry + FIELD_OFFSET( _LIST_ENTRY_T<T>, Flink ) );
-            T OldBlink = _process.memory().Read<T>( entry + FIELD_OFFSET( _LIST_ENTRY_T<T>, Blink ) );
-
-            // OldFlink->Blink = OldBlink;
-            _process.memory().Write(OldFlink + FIELD_OFFSET( _LIST_ENTRY_T<T>, Blink ), OldBlink);
-
-            // OldBlink->Flink = OldFlink;
-            _process.memory().Write(OldBlink + FIELD_OFFSET( _LIST_ENTRY_T<T>, Flink ), OldFlink);
-
-            return entry - ofst;
+            native->ReadProcessMemoryT( entry - ofst, found, sizeof( *found ) );
+            if (found->DllBase == static_cast<T>(moduleBase))
+                return entry - ofst;
         }
     }
 
@@ -1194,46 +933,52 @@ ptr_t NtLdr::UnlinkListEntry( _LIST_ENTRY_T<T> pListEntry, ptr_t head, size_t of
 template<typename T>
 void NtLdr::UnlinkListEntry( ptr_t pListLink )
 {
-    T OldFlink = _process.memory().Read<T>( pListLink + FIELD_OFFSET( _LIST_ENTRY_T<T>, Flink ) );
-    T OldBlink = _process.memory().Read<T>( pListLink + FIELD_OFFSET( _LIST_ENTRY_T<T>, Blink ) );
+    T OldFlink = _process.memory().Read<T>( fieldPtr( pListLink, &_LIST_ENTRY_T<T>::Flink ) ).result( 0 );
+    T OldBlink = _process.memory().Read<T>( fieldPtr( pListLink, &_LIST_ENTRY_T<T>::Blink ) ).result( 0 );
 
     // List is empty
     if (OldBlink == 0 || OldFlink == 0 || OldBlink == OldFlink)
         return;
 
     // OldFlink->Blink = OldBlink;
-    _process.memory().Write( OldFlink + FIELD_OFFSET( _LIST_ENTRY_T<T>, Blink ), OldBlink );
+    _process.memory().Write( fieldPtr( OldFlink, &_LIST_ENTRY_T<T>::Blink ), OldBlink );
 
     // OldBlink->Flink = OldFlink;
-    _process.memory().Write( OldBlink + FIELD_OFFSET( _LIST_ENTRY_T<T>, Flink ), OldFlink );
+    _process.memory().Write( fieldPtr( OldBlink, &_LIST_ENTRY_T<T>::Flink ), OldFlink );
 }
 
 /// <summary>
 /// Unlink from module graph
 /// </summary>
+/// <param name="mod">Module data</param>
 /// <param name="ldrEntry">Module LDR entry</param>
+/// <param name="noThread">Don't create new threads during unlink</param>
 /// <returns>Address of removed record</returns>
-ptr_t NtLdr::UnlinkTreeNode( ptr_t ldrEntry )
+template<typename T>
+ptr_t NtLdr::UnlinkTreeNode( const ModuleData& mod, ptr_t ldrEntry, bool noThread /*= false*/ )
 {
-    
-    AsmJitHelper a;
+    if (ldrEntry == 0)
+        return ldrEntry;
+
+    auto a = AsmFactory::GetAssembler( mod.type );
     uint64_t result = 0;
 
-    auto RtlRbRemoveNode = _process.modules().GetExport(
-        _process.modules().GetModule( L"ntdll.dll" ), "RtlRbRemoveNode" ).procAddress;
+    auto RtlRbRemoveNode = _process.modules().GetNtdllExport( "RtlRbRemoveNode" );
+    if (!RtlRbRemoveNode)
+        return 0;
 
-    a.GenPrologue();
-    a.GenCall( static_cast<size_t>(RtlRbRemoveNode), 
-    { 
-        _LdrpModuleIndexBase, 
-        static_cast<size_t>(ldrEntry) 
-        + FIELD_OFFSET( _LDR_DATA_TABLE_ENTRY_W8, BaseAddressIndexNode ) 
+    a->GenPrologue();
+    a->GenCall( RtlRbRemoveNode->procAddress,
+    {
+        _LdrpModuleIndexBase,
+        ldrEntry + offsetOf( &_LDR_DATA_TABLE_ENTRY_W8<T>::BaseAddressIndexNode )
     } );
 
-    _process.remote().AddReturnWithEvent( a );
-    a.GenEpilogue();
+    _process.remote().AddReturnWithEvent( *a );
+    a->GenEpilogue();
 
-    _process.remote().ExecInWorkerThread( a->make(), a->getCodeSize(), result );
+    _process.remote().CreateRPCEnvironment( noThread ? Worker_UseExisting : Worker_CreateNew, true );
+    _process.remote().ExecInWorkerThread( (*a)->make(), (*a)->getCodeSize(), result );
 
     return ldrEntry;
 }

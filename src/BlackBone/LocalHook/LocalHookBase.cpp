@@ -47,7 +47,8 @@ bool DetourBase::AllocateBuffer( uint8_t* nearest )
         _buf = (uint8_t*)VirtualAlloc( nullptr, 0x1000, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE );
 
     _origCode = _buf + 0x100;
-    _newCode  = _buf + 0x200;
+    _origThunk = _buf + 0x200;
+    _newCode  = _buf + 0x300;
 
     return _buf != nullptr;
 }
@@ -111,7 +112,7 @@ void DetourBase::CopyOldCode( uint8_t* ptr )
 { 
     // Store original bytes
     uint8_t* src = ptr;
-    uint8_t* old = (uint8_t*)_origCode;
+    uint8_t* thunk = _origThunk, *original = _origCode;
     uint32_t all_len = 0;
     ldasm_data ld = { 0 };
 
@@ -129,38 +130,39 @@ void DetourBase::CopyOldCode( uint8_t* ptr )
         }
 
         // move instruction 
-        memcpy( old, src, len );
+        memcpy( original, src, len );
+        memcpy( thunk, src, len );
 
         // if instruction has relative offset, calculate new offset 
         if (ld.flags & F_RELATIVE)
         {
             int32_t diff = 0;
-            const size_t ofst = (ld.disp_offset != 0 ? ld.disp_offset : ld.imm_offset);
-            const size_t sz = ld.disp_size != 0 ? ld.disp_size : ld.imm_size;
+            const uintptr_t ofst = (ld.disp_offset != 0 ? ld.disp_offset : ld.imm_offset);
+            const uintptr_t sz = ld.disp_size != 0 ? ld.disp_size : ld.imm_size;
 
             memcpy( &diff, src + ofst, sz );
 
         #ifdef USE64
             // exit if jump is greater then 2GB
-            if (_abs64( src + len + diff - old ) > INT_MAX)
+            if (_abs64( src + len + diff - thunk ) > INT_MAX)
             {
                 break;
             }
             else
             {
-                diff += static_cast<int32_t>(src - old);
-                memcpy( old + ofst, &diff, sz );
+                diff += static_cast<int32_t>(src - thunk);
+                memcpy( thunk + ofst, &diff, sz );
             }
         #else
-            diff += src - old;
-            memcpy( old + ofst, &diff, sz );
+            diff += src - thunk;
+            memcpy( thunk + ofst, &diff, sz );
         #endif
         }
 
         src += len;
-        old += len;
+        thunk += len;
+        original += len;
         all_len += len;
-
     } while (all_len < _origSize);
 
     // Failed to copy old code, use backup plan
@@ -171,9 +173,9 @@ void DetourBase::CopyOldCode( uint8_t* ptr )
     }         
     else
     {
-        SET_JUMP( old, src );
-        _callOriginal = _origCode;
-    }         
+        SET_JUMP( thunk, src );
+        _callOriginal = _origThunk;
+    } 
 }
 
 

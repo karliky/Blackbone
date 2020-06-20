@@ -35,6 +35,12 @@ public:
     {
     }
 
+    // memory object
+    BLACKBONE_API inline ProcessMemory& memory()
+    { 
+        return _memory; 
+    }
+    
     // Native context
     BLACKBONE_API inline _CONTEXT64& native()
     { 
@@ -134,7 +140,7 @@ public:
                 return _ctx.R9;
 
             default:
-                return _memory.Read<DWORD64>( _ctx.Rsp + 0x30 + (index - 4 ) * _wordSize );
+                return _memory.Read<DWORD64>( _ctx.Rsp + 0x28 + (index - 4) * _wordSize ).result( 0 );
             }
         }
         else
@@ -162,21 +168,18 @@ public:
             case 0:
                 _ctx.Rcx = val;
                 break;
-
             case 1:
                 _ctx.Rdx = val;
                 break;
-
             case 2:
                 _ctx.R8 = val;
                 break;
-
             case 3:
                 _ctx.R9 = val;
                 break;
 
             default:
-                return (_memory.Write( _ctx.Rsp + 0x30 + (index - 4) * _wordSize, val ) == STATUS_SUCCESS);
+                return (_memory.Write( _ctx.Rsp + 0x28 + (index - 4) * _wordSize, val ) == STATUS_SUCCESS);
             }
 
             return true;
@@ -209,7 +212,7 @@ public:
         }
 
         if (pteb)
-            return _memory.Read<DWORD>( pteb + offset );
+            return _memory.Read<DWORD>( pteb + offset ).result( 0xFFFFFFFF );
 
         return 0xFFFFFFFF;
     }
@@ -234,10 +237,10 @@ public:
             offset = FIELD_OFFSET( _TEB32, LastErrorValue );
         }
 
-        if (pteb)
-            return _memory.Write( pteb + offset, newError );
+        if (!pteb)
+            return 0xFFFFFFFF;
 
-        return 0xFFFFFFFF;
+        return _memory.Write( pteb + offset, newError );
     }
 
 
@@ -248,11 +251,10 @@ public:
     BLACKBONE_API ptr_t getUserContext()
     {
         auto pteb = _thd.teb( (_TEB64*)nullptr );
-
-        if (pteb)
-            return _memory.Read<ptr_t>( pteb + FIELD_OFFSET( _NT_TIB_T<DWORD64>, ArbitraryUserPointer ) );
-
-        return 0;
+        if (!pteb)
+            return 0;
+            
+        return _memory.Read<ptr_t>( pteb + FIELD_OFFSET( _NT_TIB_T<DWORD64>, ArbitraryUserPointer ) ).result( 0 );
     }
 
     /// <summary>

@@ -1,8 +1,10 @@
 #pragma once
 
+#pragma warning(push)
 #pragma warning(disable : 4100)
-#include "AsmJit/AsmJit.h"
-#pragma warning(default : 4100)
+#include "../../3rd_party/AsmJit/AsmJit.h"
+#pragma warning(pop)
+
 #include "../Include/Macro.h"
 
 #include <stdint.h>
@@ -13,15 +15,10 @@ namespace blackbone
 class AsmStackAllocator
 {
 public:
-    BLACKBONE_API AsmStackAllocator( asmjit::X86Assembler* pAsm, intptr_t baseval = 0x28 )
+    BLACKBONE_API AsmStackAllocator( asmjit::X86Assembler* pAsm, int32_t baseval = 0x28 )
         : _pAsm( pAsm )
-        , disp_ofst( sizeof(size_t) )
+        , disp_ofst( pAsm->getArch() == asmjit::kArch::kArchX64 ? baseval : sizeof( uint64_t ) )
     {
-#ifdef USE64
-        disp_ofst = baseval;
-#else
-        baseval = 0;
-#endif
     }
 
     /// <summary>
@@ -29,16 +26,19 @@ public:
     /// </summary>
     /// <param name="size">Variable size</param>
     /// <returns>Variable memory object</returns>
-    BLACKBONE_API asmjit::Mem AllocVar( intptr_t size )
+    BLACKBONE_API asmjit::Mem AllocVar( int32_t size )
     {
-        // Align on word length
-        size = Align( size, sizeof(size_t) );
+        bool x64 = _pAsm->getArch() == asmjit::kArch::kArchX64;
 
-#ifdef USE64
-        auto val = asmjit::Mem( _pAsm->zsp, static_cast<int32_t>(disp_ofst), static_cast<int32_t>(size) );
-#else
-        auto val = asmjit::Mem( _pAsm->zbp, -disp_ofst - size, size );
-#endif
+        // Align on word length
+        size = static_cast<int32_t>(Align( size, x64 ? sizeof( uint64_t ) : sizeof( uint32_t ) ));
+
+        asmjit::Mem val;
+        if (x64)
+            val = asmjit::Mem( _pAsm->zsp, disp_ofst, size );
+        else
+            val = asmjit::Mem( _pAsm->zbp, -disp_ofst - size, size );
+
         disp_ofst += size;
         return val;
     }
@@ -50,15 +50,15 @@ public:
     /// <param name="count">Array elements count.</param>
     /// <param name="size">Element size.</param>
     /// <returns>true on success</returns>
-    BLACKBONE_API bool AllocArray( asmjit::Mem arr[], int count, intptr_t size )
+    BLACKBONE_API bool AllocArray( asmjit::Mem arr[], int count, int32_t size )
     {
         for (int i = 0; i < count; i++)
         {
-#ifdef USE64
-            arr[i] = asmjit::Mem( _pAsm->zsp, static_cast<int32_t>(disp_ofst), static_cast<int32_t>(size) );
-#else
-            arr[i] = asmjit::Mem( _pAsm->zbp, -disp_ofst - size, size );
-#endif
+            if (_pAsm->getArch() == asmjit::kArch::kArchX64)
+                arr[i] = asmjit::Mem( _pAsm->zsp, disp_ofst, size );
+            else
+                arr[i] = asmjit::Mem( _pAsm->zbp, -disp_ofst - size, size );
+
             disp_ofst += size;
         }
 
@@ -73,7 +73,7 @@ public:
 
 private:
     asmjit::X86Assembler* _pAsm;    // Underlying assembler
-    intptr_t disp_ofst;             // Next variable stack offset
+    int32_t disp_ofst;              // Next variable stack offset
 };
 
 //

@@ -2,22 +2,21 @@
 
 #include <cstdio>
 #include <cstdlib>
-#include <algorithm>
+
+#pragma warning(push)
+#pragma warning(disable : 4091)
 #include <DbgHelp.h>
+#pragma warning(pop)
 
 namespace blackbone
 {
-#ifndef BLACBONE_NO_TRACE
+#ifndef BLACKBONE_NO_TRACE
 
-template<typename Ch>
-inline void DoTraceV( const Ch* fmt, va_list va_args );
-
-template<>
-inline void DoTraceV<char>( const char* fmt, va_list va_args )
+inline void DoTraceV( const char* fmt, va_list va_args )
 {
     char buf[2048], userbuf[1024];
     vsprintf_s( userbuf, fmt, va_args );
-    sprintf_s( buf, "BlackBone: %ls\r\n", userbuf );
+    sprintf_s( buf, "BlackBone: %s\r\n", userbuf );
     OutputDebugStringA( buf );
 
 #ifdef CONSOLE_TRACE
@@ -25,8 +24,7 @@ inline void DoTraceV<char>( const char* fmt, va_list va_args )
 #endif
 }
 
-template<>
-inline void DoTraceV<wchar_t>( const wchar_t* fmt, va_list va_args )
+inline void DoTraceV( const wchar_t* fmt, va_list va_args )
 {
     wchar_t buf[2048], userbuf[1024];
     vswprintf_s( userbuf, fmt, va_args );
@@ -47,10 +45,10 @@ inline void DoTrace( const Ch* fmt, ... )
     va_end( va_args );
 }
 
-#define BLACBONE_TRACE(fmt, ...) DoTrace(fmt, ##__VA_ARGS__)
+#define BLACKBONE_TRACE(fmt, ...) DoTrace(fmt, ##__VA_ARGS__)
 
 #else
-#define BLACBONE_TRACE(...)
+#define BLACKBONE_TRACE(...)
 #endif
 
 }

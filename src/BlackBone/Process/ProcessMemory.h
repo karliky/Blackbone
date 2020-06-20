@@ -10,6 +10,13 @@
 namespace blackbone
 {
 
+
+enum class MemProtectionCasting
+{
+    none,   // Don't change provided memory protection flags
+    useDep  // Strip executable flag if DEP is off
+};
+
 class ProcessMemory : public RemoteMemory
 {
 public:
@@ -22,8 +29,9 @@ public:
     /// <param name="size">Block size</param>
     /// <param name="protection">Memory protection</param>
     /// <param name="desired">Desired base address of new block</param>
+    /// <param name="desired">false if caller will be responsible for block deallocation</param>
     /// <returns>Memory block. If failed - returned block will be invalid</returns>
-    BLACKBONE_API MemBlock Allocate( size_t size, DWORD protection = PAGE_EXECUTE_READWRITE, ptr_t desired = 0 );
+    BLACKBONE_API call_result_t<MemBlock> Allocate( size_t size, DWORD protection = PAGE_EXECUTE_READWRITE, ptr_t desired = 0, bool own = true );
 
     /// <summary>
     /// Free memory
@@ -55,7 +63,7 @@ public:
     /// <summary>
     /// Read data
     /// </summary>
-    /// <param name="dwAddress">Memoey address to read from</param>
+    /// <param name="dwAddress">Memory address to read from</param>
     /// <param name="dwSize">Size of data to read</param>
     /// <param name="pResult">Output buffer</param>
     /// <param name="handleHoles">
@@ -64,6 +72,19 @@ public:
     /// </param>
     /// <returns>Status</returns>
     BLACKBONE_API NTSTATUS Read( ptr_t dwAddress, size_t dwSize, PVOID pResult, bool handleHoles = false );
+
+    /// <summary>
+    /// Read data
+    /// </summary>
+    /// <param name="adrList">Base address + list of offsets</param>
+    /// <param name="dwSize">Size of data to read</param>
+    /// <param name="pResult">Output buffer</param>
+    /// <param name="handleHoles">
+    /// If true, function will try to read all committed pages in range ignoring uncommitted ones.
+    /// Otherwise function will fail if there is at least one non-committed page in region.
+    /// </param>
+    /// <returns>Status</returns>
+    BLACKBONE_API NTSTATUS Read( const std::vector<ptr_t>& adrList, size_t dwSize, PVOID pResult, bool handleHoles = false );
 
     /// <summary>
     /// Write data
@@ -75,17 +96,39 @@ public:
     BLACKBONE_API NTSTATUS Write( ptr_t pAddress, size_t dwSize, const void* pData );
 
     /// <summary>
+    /// Write data
+    /// </summary>
+    /// <param name="adrList">Base address + list of offsets</param>
+    /// <param name="dwSize">Size of data to write</param>
+    /// <param name="pData">Buffer to write</param>
+    /// <returns>Status</returns>
+    BLACKBONE_API NTSTATUS Write( const std::vector<ptr_t>& adrList, size_t dwSize, const void* pData );
+
+    /// <summary>
     /// Read data
     /// </summary>
     /// <param name="dwAddress">Address to read from</param>
     /// <returns>Read data</returns>
     template<class T>
-    inline T Read( ptr_t dwAddress )
+    inline call_result_t<T> Read( ptr_t dwAddress )
     {
-        T res; 
-        Read( dwAddress, sizeof(T), &res );
-        return res;
+        auto res = reinterpret_cast<T*>(_malloca( sizeof( T ) ));
+        auto status = Read( dwAddress, sizeof( T ), res );
+        return call_result_t<T>( *res, status );
     };
+
+    /// <summary>
+    /// Read data
+    /// </summary>
+    /// <param name="adrList">Base address + list of offsets</param>
+    /// <returns>Read data</returns>
+    template<class T>
+    inline call_result_t<T> Read( std::vector<ptr_t>&& adrList )
+    {
+        auto res = reinterpret_cast<T*>(_malloca( sizeof( T ) ));
+        auto status = Read( std::forward<std::vector<ptr_t>>( adrList ), sizeof( T ), res );
+        return call_result_t<T>( *res, status );
+    }
 
     /// <summary>
     /// Read data
@@ -100,6 +143,18 @@ public:
     };
 
     /// <summary>
+    /// Read data
+    /// </summary>
+    /// <param name="adrList">Base address + list of offsets</param>
+    /// <param name="result">Read data</param>
+    /// <returns>Status code</returns>
+    template<class T>
+    inline NTSTATUS Read( std::vector<ptr_t>&& adrList, T& result )
+    {
+        return Read( std::forward<std::vector<ptr_t>>( adrList ), sizeof( result ), &result );
+    };
+
+    /// <summary>
     /// Write data
     /// </summary>
     /// <param name="dwSize">Size of data to write</param>
@@ -108,27 +163,51 @@ public:
     template<class T>
     inline NTSTATUS Write( ptr_t dwAddress, const T& data )
     {
-        return Write( dwAddress, sizeof(T), &data );
+        return Write( dwAddress, sizeof( T ), &data );
+    }
+
+    /// <summary>
+    /// Write data
+    /// </summary>
+    /// <param name="adrList">Base address + list of offset</param>
+    /// <param name="data">Data to write</param>
+    /// <returns>Status</returns>
+    template<class T>
+    inline NTSTATUS Write( std::vector<ptr_t>&& adrList, const T& data )
+    {
+        return Write( std::forward<std::vector<ptr_t>>( adrList ), sizeof( T ), &data );
     }
 
     /// <summary>
     /// Enumerate valid memory regions
     /// </summary>
-    /// <param name="results">Found regions</param>
     /// <param name="includeFree">If true - non-allocated regions will be included in list</param>
-    /// <returns>Number of regions found</returns>
-    BLACKBONE_API size_t EnumRegions( std::list<MEMORY_BASIC_INFORMATION64>& results, bool includeFree = false );
+    /// <returns>Found regions</returns>
+    BLACKBONE_API std::vector<MEMORY_BASIC_INFORMATION64> EnumRegions( bool includeFree = false );
+
+    /// <summary>
+    /// Get memory protection casting behavior 
+    /// </summary>
+    /// <returns>current behavior</returns>
+    BLACKBONE_API MemProtectionCasting protectionCasting() {  return _casting; }
+
+    /// <summary>
+    /// Set memory protection casting behavior 
+    /// </summary>
+    /// <param name="flag">new behavior</param>
+    BLACKBONE_API void protectionCasting( MemProtectionCasting casting ) { _casting = casting; }
 
     BLACKBONE_API inline class ProcessCore& core() { return _core; }
     BLACKBONE_API inline class Process* process()  { return _process; }
 
 private:
     ProcessMemory( const ProcessMemory& ) = delete;
-    ProcessMemory& operator =(const ProcessMemory&) = delete;
+    ProcessMemory& operator =( const ProcessMemory& ) = delete;
 
 private:
     class Process* _process;    // Owning process object
     class ProcessCore& _core;   // Core routines
+    MemProtectionCasting _casting = MemProtectionCasting::useDep;
 };
 
 }
